@@ -12,7 +12,7 @@ OscModule 负责桥接器的生命周期（每次启动重建桥接器，
 META = {
     "id": "osc_bridge",
     "name": "VRChat OSC 联动",
-    "version": "1.5.0",
+    "version": "1.6.0",
     "description": "头像参数动态建表，核心参数映射表双向表达式驱动："
                    "设备数值经表达式写回头像参数，头像参数/游戏信号反向控制设备。",
     "settings_key": "osc",

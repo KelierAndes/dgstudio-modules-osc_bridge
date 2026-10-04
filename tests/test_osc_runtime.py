@@ -13,7 +13,7 @@ import _bootstrap  # noqa: F401  定位 DGStudio 核心仓库
 
 from dglab.official_waveforms_ovc import OvcWaveform
 from dglab.state import EngineState, Slot
-from dglab.waves import CONTINUOUS, SILENT
+from dglab.waves import CONTINUOUS, PULSE_STREAM, SILENT
 from modules.osc_bridge.bridge import OscBridge, OscConfig
 
 
@@ -78,8 +78,10 @@ class OscFamilyInputTests(unittest.IsolatedAsyncioTestCase):
 
         order = wave_order("COYOTE")
         assert order[0] == SILENT and order[1] == CONTINUOUS
-        assert len(order) == 26
-        assert wave_order("OVC")[2:] == [w.value for w in OvcWaveform]
+        assert len(order) == 27
+        assert order[-1] == PULSE_STREAM
+        assert wave_order("OVC")[2:-1] == [w.value for w in OvcWaveform]
+        assert wave_order("OVC")[-1] == PULSE_STREAM
 
         state = _state(("coyote-1", "COYOTE_030"))
 
@@ -98,10 +100,10 @@ class OscFamilyInputTests(unittest.IsolatedAsyncioTestCase):
             def wave_selection(self):
                 return dict(self._selected_wave)
 
-            async def fire_start(self, slot_id=None):
+            async def fire_start(self, slot_id=None, channel=None):
                 pass
 
-            async def fire_stop(self, slot_id=None):
+            async def fire_stop(self, slot_id=None, channel=None):
                 pass
 
             async def emergency_stop(self):
@@ -144,11 +146,11 @@ class OscFamilyInputTests(unittest.IsolatedAsyncioTestCase):
             async def set_wave(self, ch, name, slot_id=None):
                 pass
 
-            async def fire_start(self, slot_id=None):
-                events.append(f"start:{slot_id}")
+            async def fire_start(self, slot_id=None, channel=None):
+                events.append(f"start:{slot_id}:{channel}")
 
-            async def fire_stop(self, slot_id=None):
-                events.append(f"stop:{slot_id}")
+            async def fire_stop(self, slot_id=None, channel=None):
+                events.append(f"stop:{slot_id}:{channel}")
 
             async def emergency_stop(self):
                 pass
@@ -164,10 +166,15 @@ class OscFamilyInputTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.3)
             sender.send_message("/avatar/parameters/DGLabFire", [False])
             await asyncio.sleep(0.3)
+            sender.send_message("/avatar/parameters/DGLabFireA", [True])
+            await asyncio.sleep(0.3)
+            sender.send_message("/avatar/parameters/DGLabFireA", [False])
+            await asyncio.sleep(0.3)
         finally:
             await bridge.stop()
 
-        assert events == ["start:coyote-1", "stop:coyote-1"], events
+        assert events == ["start:coyote-1:None", "stop:coyote-1:None",
+                          "start:coyote-1:A", "stop:coyote-1:A"], events
 
 
 class OscProbeTests(unittest.IsolatedAsyncioTestCase):

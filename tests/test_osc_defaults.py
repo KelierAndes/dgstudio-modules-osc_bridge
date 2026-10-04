@@ -23,6 +23,14 @@ class DefaultNameTests(unittest.TestCase):
                          "DGLabStrengthA")
         self.assertEqual(default_input_name(CONFIG, "in_ovc_fire"),
                          "DGLabOvcInFire")
+        self.assertEqual(default_input_name(CONFIG, "in_fire_a"),
+                         "DGLabFireA")
+        self.assertEqual(default_input_name(CONFIG, "in_fire_b"),
+                         "DGLabFireB")
+        self.assertEqual(default_input_name(CONFIG, "in_ovc_fire_a"),
+                         "DGLabOvcInFireA")
+        self.assertEqual(default_input_name(CONFIG, "in_ovc_fire_b"),
+                         "DGLabOvcInFireB")
         self.assertEqual(default_input_name(CONFIG, "in_ovc_wave_step_b"),
                          "DGLabOvcInWaveStepB")
         self.assertEqual(default_input_name(CONFIG, "in_emergency"),
