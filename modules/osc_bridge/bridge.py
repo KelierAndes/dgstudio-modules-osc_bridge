@@ -66,10 +66,14 @@ class OscConfig(dict):
 
 
 class OscBridge:
-    def __init__(self, config: OscConfig, get_state, commands, events=None):
+    def __init__(self, config: OscConfig, get_state, commands, events=None,
+                 on_auto_rows=None):
         self.config = config
         self.get_state = get_state
         self.commands = commands
+        # 设备集变化回调：fn(默认输入行, 默认输出行)，模块据此把新设备
+        # 参数落地进配置表（联动页即见），见 plugin._persist_auto_rows
+        self._on_auto_rows = on_auto_rows
 
         self._client = SimpleUDPClient(config["out_ip"], int(config["out_port"]))
         self._dispatcher = Dispatcher()
@@ -324,6 +328,18 @@ class OscBridge:
             return
         self._auto_sig = sig
         self.apply_config()
+        self._notify_device_rows(state)
+
+    def _notify_device_rows(self, state) -> None:
+        """设备集变化 → 把当前设备的默认参数行交给模块落地配置。"""
+        callback = self._on_auto_rows
+        if callback is None or state is None:
+            return
+        try:
+            callback(default_input_rows(self.config, state),
+                     default_output_rows(self.config, state))
+        except Exception as exc:
+            self.log(f"[OSC] 设备参数自动落地失败: {exc!r}")
 
     def _send_keepalive(self) -> None:
         """从接收端口向 VRChat 发注册包, 使其把回传 OSC 发往本机网卡地址.
@@ -381,12 +397,28 @@ def _device_sig(state, prefixes: dict) -> tuple:
                  for sid, info in sorted(names.items()))
 
 
-def default_input_rows(config: dict) -> list[dict]:
-    """按设备前缀生成默认「直传」映射行（与旧版内置参数名一致）。"""
+def default_input_rows(config: dict, state=None) -> list[dict]:
+    """按设备前缀生成默认「直传」映射行（与旧版内置参数名一致）。
+
+    给出 ``state`` 时只为已接入设备家族生成（全局急停始终保留），供设备
+    连接后自动暴露参数；``state`` 为 None 时保持旧行为生成全部家族
+    （引擎空表兜底口径）。
+    """
     prefixes = dict(config.get("device_prefixes") or {})
     global_prefix = str(config.get("prefix") or "DGLab")
+    if state is None:
+        families = None
+    else:
+        try:
+            names = device_osc_names(state, prefixes)
+        except Exception:
+            names = {}
+        families = {info["family"] for info in names.values()}
     rows: list[dict] = []
     for spec in core_inputs():
+        if families is not None and spec["family"] \
+                and spec["family"] not in families:
+            continue
         if spec["action"] == "emergency":
             name = f"{global_prefix}Emergency"
         else:

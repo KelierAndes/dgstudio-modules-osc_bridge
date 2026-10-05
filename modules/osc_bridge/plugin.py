@@ -5,6 +5,12 @@
 （``mappings`` 核心输入参数 ← 表达式，``outputs`` 头像参数名 ← 核心输出参数表达式），
 配置文件除桥接设置外只保存这两张表。META["config"] 声明全部配置项，
 宿主装载 config/osc.json 时自动补齐缺省，联动页据此渲染映射表与模块设置。
+
+设备接入后自动向核心暴露该设备全部可写/可读参数：输入表按设备家族补
+「核心输入参数 ← 头像参数」行（如 郊狼通道A强度 ← DGLabStrengthA），
+输出表按接入设备补「核心输出参数 → 头像参数」行（如 灵猫气压
+BMTR.Pressure → DGLabBmtrPressure）；缺省行以参数 id 记账（auto_exposed），
+用户删除的行不会随设备变化复活，已有行的改名与表达式原样保留。
 OscModule 负责桥接器的生命周期（每次启动重建桥接器，
 使「修改地址/端口 → 重新开关」立即生效）。
 """
@@ -12,9 +18,10 @@ OscModule 负责桥接器的生命周期（每次启动重建桥接器，
 META = {
     "id": "osc_bridge",
     "name": "VRChat OSC 联动",
-    "version": "1.6.0",
+    "version": "1.7.0",
     "description": "头像参数动态建表，核心参数映射表双向表达式驱动："
-                   "设备数值经表达式写回头像参数，头像参数/游戏信号反向控制设备。",
+                   "设备数值经表达式写回头像参数，头像参数/游戏信号反向控制设备；"
+                   "设备接入即自动暴露其全部可写/可读参数。",
     "settings_key": "osc",
     "actions": ["osc"],
     "default_enabled": False,
@@ -92,11 +99,26 @@ class OscModule(ModuleBase):
         return META["config"]
 
     def link_params(self) -> list[tuple[str, str]]:
-        """动态参数表：近期收到的头像参数名。"""
+        """动态参数表：近期收到的头像参数 + 已接入设备的默认参数名。"""
         if self.bridge is None:
             return []
-        return [(name, f"头像参数 · {name}") for name in self.bridge.param_names()
-                if name not in ("change",)]
+        pool: dict[str, str] = {}
+        for name in self.bridge.param_names():
+            if name != "change":
+                pool[name] = f"头像参数 · {name}"
+        state = None
+        try:
+            state = self.bridge.get_state()
+        except Exception:
+            state = None
+        if state is not None:
+            # 接入设备的默认头像参数名也进入变量池：未收到任何 OSC 包时
+            # 表达式同样可以点选（可读参数随设备连接即暴露给核心）
+            for row in default_input_rows(self.bridge.config, state):
+                name = str(row.get("expr") or "").strip().strip("{}")
+                if name:
+                    pool.setdefault(name, f"头像参数默认名 · {name}")
+        return sorted(pool.items())
 
     def on_load(self, ctx) -> None:
         self.ctx = ctx
@@ -124,6 +146,7 @@ class OscModule(ModuleBase):
             self.ctx.engine.get_state,
             self.ctx.engine,
             events=self.ctx.events,
+            on_auto_rows=self._persist_auto_rows,
         )
         self.bridge.log = self.ctx.log
         await self.bridge.start()
@@ -171,13 +194,34 @@ class OscModule(ModuleBase):
         bridge.send_value(address, value)
         self.ctx.log(f"OSC {address} = {value}")
 
+    def _persist_auto_rows(self, rows_in: list[dict], rows_out: list[dict]) -> None:
+        """设备集变化时落地新设备的参数行（桥接推送循环回调）。
+
+        以参数 id 记账（auto_exposed）：出现过的 id 不重复落地，用户删除
+        的行不会被设备变化复活，已有行的改名与表达式原样保留。落盘后
+        同步桥接映射表并通知界面重建，联动页即见新参数。
+        """
+        settings = self.ctx.settings
+        if not _expose_device_rows(settings, rows_in, rows_out):
+            return
+        if self.bridge is not None:
+            self.bridge.config["mappings"] = _rows(settings.get("mappings"))
+            self.bridge.config["outputs"] = _rows(settings.get("outputs"))
+            self.bridge.apply_config()
+        events = getattr(self.ctx, "events", None)
+        if events is not None:
+            events.emit("modules_changed", self.id)
+
 
 def migrate_legacy(settings) -> bool:
-    """旧版逐参数名/input_expr/custom_inputs → ``mappings`` 行表（输出表在启动时按
-    当前设备落地，见 :func:`materialize`）。"""
+    """旧版逐参数名/input_expr/custom_inputs → ``mappings`` 行表。
+
+    只迁移真正的旧配置内容；全新配置不再预填全家族默认行——缺省行由
+    :func:`materialize` 与设备接入回调按接入设备记账落地（auto_exposed）。
+    """
     changed = False
     if not _rows(settings.get("mappings")):
-        rows = _legacy_input_rows(settings) or default_input_rows(settings)
+        rows = _legacy_input_rows(settings)
         if rows:
             settings["mappings"] = rows
             changed = True
@@ -193,19 +237,61 @@ def migrate_legacy(settings) -> bool:
 
 
 def materialize(settings, state) -> bool:
-    """启动时把空的输出表按当前接入设备落地成可编辑的完整行。"""
-    changed = False
-    if not _rows(settings.get("outputs")):
-        rows = default_output_rows(settings, state)
-        if rows:
-            settings["outputs"] = rows
-            changed = True
+    """按当前接入设备把缺省参数行落地成可编辑的完整行（双向，启动时调用）。
+
+    输入表按接入家族补核心输入参数行（含全局急停），输出表按接入设备补
+    输出参数行（含全局 Action）；``auto_exposed`` 记账保证用户删除的行
+    不被复活。旧版 ``output_map`` 的重命名优先落地。
+    """
+    changed = _expose_device_rows(
+        settings,
+        default_input_rows(settings, state),
+        default_output_rows(settings, state))
     if changed and "output_map" in settings:
         settings.pop("output_map", None)
-    if changed:
-        if hasattr(settings, "save"):
-            settings.save()
     return changed
+
+
+def _expose_device_rows(settings, rows_in: list[dict],
+                        rows_out: list[dict]) -> bool:
+    """把缺省参数行并入两张映射表并记账（返回是否发生变更）。
+
+    记账本 ``auto_exposed`` 记录暴露过的参数 id：已有行（含用户新建的）
+    一并记入，故删除行不会被下次设备变化重新补回。
+    """
+    exposed = {str(x) for x in (settings.get("auto_exposed") or [])}
+    orig = set(exposed)
+    merged_in, in_changed = _expose_rows(settings.get("mappings"), rows_in,
+                                         exposed)
+    merged_out, out_changed = _expose_rows(settings.get("outputs"), rows_out,
+                                           exposed)
+    if not (in_changed or out_changed or exposed != orig):
+        return False
+    if in_changed:
+        settings["mappings"] = merged_in
+    if out_changed:
+        settings["outputs"] = merged_out
+    settings["auto_exposed"] = sorted(exposed)
+    materialize_names(settings)
+    return True
+
+
+def _expose_rows(existing, defaults, exposed: set) -> tuple[list, bool]:
+    """defaults 中未暴露过的参数行并入 existing（已有行原样保留）。"""
+    rows = _rows(existing)
+    exposed.update(str(row.get("param") or "") for row in rows)
+    have = {str(row.get("param") or "") for row in rows}
+    out = list(rows)
+    changed = False
+    for row in defaults or []:
+        pid = str(row.get("param") or "").strip()
+        if not pid or pid in have or pid in exposed:
+            continue
+        out.append(dict(row))
+        have.add(pid)
+        exposed.add(pid)
+        changed = True
+    return out, changed
 
 
 def materialize_names(settings) -> bool:
