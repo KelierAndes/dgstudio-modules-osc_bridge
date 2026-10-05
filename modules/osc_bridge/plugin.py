@@ -18,7 +18,7 @@ config/osc.json 时自动补齐缺省。
 META = {
     "id": "osc_bridge",
     "name": "VRChat OSC 联动",
-    "version": "1.9.0",
+    "version": "1.9.1",
     "description": "头像参数动态建表；设备接入即把可读参数建为完整 OSC "
                    "路径命名的临时变量并按变量名自动回传（重命名即改地址），"
                    "不建事件流、不写映射表。",
@@ -157,12 +157,13 @@ class OscModule(ModuleBase):
         await self.bridge.start()
 
     async def reload_config(self) -> None:
-        """映射表/前缀配置变更后立即重载引擎装载（无需重启桥接）。"""
+        """映射表/前缀/临时变量变更后立即重载引擎装载（无需重启桥接）。"""
         if self.bridge is None:
             return
-        for key in ("mappings", "outputs", "prefix", "device_prefixes"):
+        for key in ("mappings", "outputs", "temps", "prefix",
+                    "device_prefixes"):
             self.bridge.config[key] = self.ctx.settings.get(
-                key, OSC_CONFIG_DEFAULTS[key])
+                key, OSC_CONFIG_DEFAULTS.get(key))
         self.bridge.apply_config()
 
     async def stop(self) -> None:
@@ -226,13 +227,26 @@ class OscModule(ModuleBase):
             return
         settings["temps"] = rows
         settings["auto_wired"] = sorted(wired)
+        self._sync_temps()
         self._reload_logic()
         bus = getattr(self.ctx, "events", None)
         if bus is not None:
             bus.emit("modules_changed", self.id)
 
+    def _sync_temps(self) -> None:
+        """把配置临时变量同步进桥接并重载（模块自算回传立即生效）。"""
+        if self.bridge is None:
+            return
+        self.bridge.config["temps"] = [
+            r for r in (self.ctx.settings.get("temps") or [])
+            if isinstance(r, dict)]
+        self.bridge.apply_config()
+
     def _reload_logic(self) -> None:
-        """让宿主重载逻辑表：临时变量/事件流装载进引擎并启动事件节拍。"""
+        """请宿主重载逻辑表（新核心：临时变量进引擎与联动页面板实时值）。
+
+        发行版核心没有 reload 钩子，静默跳过——回传链路由模块自算承担。
+        """
         host = getattr(self.ctx.engine, "modules", None)
         reload_fn = getattr(host, "reload", None) if host is not None else None
         if reload_fn is None:

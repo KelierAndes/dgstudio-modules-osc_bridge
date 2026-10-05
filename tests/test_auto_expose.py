@@ -197,29 +197,29 @@ class StripAutoCardsTests(unittest.TestCase):
 
 
 class PushTempsTests(unittest.TestCase):
-    def _bridge(self):
-        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: None, None)
+    def _bridge(self, temp_rows):
+        bridge = OscBridge(OscConfig(dict(CONFIG, temps=temp_rows)),
+                           lambda: None, None)
         sent: list[tuple[str, object]] = []
         bridge.send_value = lambda addr, value: sent.append((addr, value))
         return bridge, sent
 
     def test_path_temps_are_sent_by_name(self):
-        bridge, sent = self._bridge()
+        bridge, sent = self._bridge([
+            {"name": _temp_path("DGLabStrengthA"),
+             "expr": "{COYOTE.StrengthA}"},
+            {"name": _temp_path("DGLabBmtrPressure"),
+             "expr": "{BMTR.Pressure}"},
+            {"name": _temp_path("DGLabConnected"),
+             "expr": "{COYOTE.Connected}"},
+            {"name": "plain_temp", "expr": "1"},          # 非路径行不回传
+            {"name": _temp_path("Broken"), "expr": "{"},  # 非法表达式跳过
+        ])
+        bridge.apply_config()
         try:
-            eng = bridge.engine
-            eng._temp_table = [
-                {"name": _temp_path("DGLabStrengthA"),
-                 "expr": "{COYOTE.StrengthA}"},
-                {"name": _temp_path("DGLabBmtrPressure"),
-                 "expr": "{BMTR.Pressure}"},
-                {"name": _temp_path("DGLabConnected"),
-                 "expr": "{COYOTE.Connected}"},
-                {"name": "plain_temp", "expr": "1"},
-            ]
-            eng.temps[_temp_path("DGLabStrengthA")] = 42.0
-            eng.temps[_temp_path("DGLabBmtrPressure")] = 7.9125
-            eng.temps[_temp_path("DGLabConnected")] = 1.0
-            eng.temps["plain_temp"] = 1.0
+            bridge.engine.signals["COYOTE.StrengthA"] = 42.0
+            bridge.engine.signals["BMTR.Pressure"] = 7.9125
+            bridge.engine.signals["COYOTE.Connected"] = 1.0
             bridge._push_values()
 
             addrs = {addr: value for addr, value in sent}
@@ -227,7 +227,8 @@ class PushTempsTests(unittest.TestCase):
             self.assertEqual(addrs["/avatar/parameters/DGLabBmtrPressure"],
                              7.912)          # Float 三位
             self.assertIs(addrs["/avatar/parameters/DGLabConnected"], True)
-            self.assertNotIn("/plain_temp", addrs)   # 非路径变量不回传
+            self.assertNotIn("/plain_temp", addrs)
+            self.assertNotIn("/avatar/parameters/Broken", addrs)
             # 值未变不重发
             bridge._push_values()
             self.assertEqual(len(sent), 3)
@@ -235,18 +236,38 @@ class PushTempsTests(unittest.TestCase):
             bridge.close()
 
     def test_changed_value_and_custom_expr_resend(self):
-        bridge, sent = self._bridge()
+        bridge, sent = self._bridge([
+            {"name": _temp_path("DGLabStrengthA"),
+             "expr": "{COYOTE.StrengthA} * 2"}])
+        bridge.apply_config()
         try:
-            eng = bridge.engine
-            eng._temp_table = [{"name": _temp_path("DGLabStrengthA"),
-                                "expr": "{COYOTE.StrengthA} * 2"}]
-            eng.temps[_temp_path("DGLabStrengthA")] = 21.0
+            bridge.engine.signals["COYOTE.StrengthA"] = 10.5
             bridge._push_values()
-            eng.temps[_temp_path("DGLabStrengthA")] = 30.0
+            bridge.engine.signals["COYOTE.StrengthA"] = 15.0
             bridge._push_values()
             # 自定义（非裸引用）表达式原样发送，值变化才重发
             self.assertEqual(sent, [("/avatar/parameters/DGLabStrengthA", 21.0),
-                                    ("/avatar/parameters/DGLabStrengthA", 30.0)])
+                                    ("/avatar/parameters/DGLabStrengthA",
+                                     30.0)])
+        finally:
+            bridge.close()
+
+    def test_device_vars_feed_evaluation(self):
+        # 核心输出参数实时值来自设备状态（device_vars），无需外部信号
+        state = _state(("c1", "COYOTE_030"))
+        state.slots["c1"].strength = {"A": 80, "B": 0}
+        state.slots["c1"].strength_limit = {"A": 200, "B": 200}
+        bridge = OscBridge(OscConfig(dict(CONFIG, temps=[
+            {"name": _temp_path("DGLabStrengthA"),
+             "expr": "{COYOTE.StrengthA}"}])),
+            lambda: state, None)
+        bridge.apply_config()
+        try:
+            sent: list[tuple[str, object]] = []
+            bridge.send_value = lambda addr, value: sent.append((addr, value))
+            bridge._push_values()
+            self.assertEqual(sent,
+                             [("/avatar/parameters/DGLabStrengthA", 80)])
         finally:
             bridge.close()
 
@@ -286,7 +307,8 @@ class NotifyTests(unittest.TestCase):
 
 
 class EndToEndTests(unittest.IsolatedAsyncioTestCase):
-    """建变量 → 宿主装载临时变量表 → 引擎求值 → 按路径回传 全链路。"""
+    """建变量 → 桥接自算求值 → 按路径回传 全链路（旧核心路径：宿主无
+    reload/临时变量装载能力，回传完全由模块承担）。"""
 
     async def test_temp_rows_flow_to_osc(self):
         state = _state(("c1", "COYOTE_030"))
@@ -300,8 +322,10 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
             async def set_strength(self, ch, v, slot_id=None):
                 pass
 
-        host = _Host(mod)
-        ctx.engine.modules = host
+        class LegacyHost:      # 旧核心宿主：无 reload/临时变量装载能力
+            pass
+
+        ctx.engine.modules = LegacyHost()
         mod.ctx = ctx
         cfg = OscConfig(dict(ctx.settings), defaults=OSC_CONFIG_DEFAULTS)
         mod.bridge = OscBridge(cfg, ctx.engine.get_state, Commands(),
@@ -316,8 +340,10 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
             mod.bridge._check_devices(state)   # 推送循环首拍会触发，这里手动加速
             self.assertIn(_temp_path("DGLabStrengthA"),
                           [r["name"] for r in ctx.settings["temps"]])
-            await asyncio.sleep(0.1)           # 宿主 reload 装载临时变量表
-            self.assertIn(_temp_path("DGLabStrengthA"), eng.temps)
+            await asyncio.sleep(0.1)
+            # 桥接自持行表已装载（不依赖宿主 reload），求值回传设备当前强度
+            self.assertIn(_temp_path("DGLabStrengthA"),
+                          [r["name"] for r in mod.bridge._temp_rows])
             mod.bridge._push_values()
             addrs = {addr: value for addr, value in sent}
             self.assertEqual(addrs["/avatar/parameters/DGLabStrengthA"], 42)

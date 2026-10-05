@@ -25,6 +25,7 @@ from pythonosc.dispatcher import Dispatcher
 from pythonosc.osc_message_builder import OscMessageBuilder
 from pythonosc.udp_client import SimpleUDPClient
 
+from dglab import expr
 from dglab.mapping import MappingEngine, signal_specs
 from dglab.naming import (INPUT_NAME_TEMPLATES, default_input_name,
                           default_output_name, device_osc_names)
@@ -96,6 +97,7 @@ class OscBridge:
         self.engine = MappingEngine(self._dispatch,
                                     device_vars=self._device_vars,
                                     ranges=input_ranges())
+        self._temp_rows: list[dict] = []   # 路径命名临时变量（模块自算回传）
         self._api = self._DeviceApi(self)
         self.dispatchers = build_dispatchers(self._api, core_inputs())
         self._auto_sig: tuple | None = None
@@ -111,8 +113,9 @@ class OscBridge:
 
     # ---- 映射表 ---------------------------------------------------------
     def apply_config(self) -> None:
-        """装载两张映射表；首轮只静默求值，避免启动即把设备写成 0。"""
+        """装载两张映射表与路径型临时变量；首轮只静默求值，避免启动即把设备写成 0。"""
         rows_in, rows_out = effective_rows(self.config, self._safe_state())
+        self._temp_rows = self._path_temp_rows()
         first = not self._primed
         if first:
             self.engine.armed = False
@@ -121,6 +124,31 @@ class OscBridge:
         if first:
             self.engine.armed = True
             self._primed = True
+
+    def _path_temp_rows(self) -> list[dict]:
+        """配置临时变量中的路径型行（变量名含 ``/``，即 OSC 回传地址）。
+
+        模块自持自算，不依赖宿主把临时变量装载进引擎（发行版核心无该
+        能力）；非路径行留给宿主/映射引擎。表达式经 normalize 校验，
+        非法行跳过。
+        """
+        rows: list[dict] = []
+        seen: set[str] = set()
+        for row in (self.config.get("temps") or []):
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "").strip()
+            if "/" not in name or name in seen:
+                continue
+            try:
+                text = expr.normalize(row.get("expr") or "")
+            except expr.ExprError:
+                continue
+            if not text:
+                continue
+            seen.add(name)
+            rows.append({"name": name, "expr": text})
+        return rows
 
     def _safe_state(self):
         try:
@@ -364,35 +392,44 @@ class OscBridge:
         self._push_temps()
 
     def _push_temps(self) -> None:
-        """把路径命名的临时变量（变量名含 ``/``）回传到对应 OSC 地址。
+        """路径命名临时变量 → 按变量名回传 OSC（模块自算，发行版核心可用）。
 
-        变量名即回传地址（去掉开头 ``/`` 后补全），如临时变量
-        ``avatar/parameters/DGLabStrengthA`` → 发送
-        ``/avatar/parameters/DGLabStrengthA``；用户重命名变量即改地址。
+        值空间 = 引擎值空间（头像参数信号 ∪ 核心输出参数实时值 ∪ 引擎
+        临时变量）；对配置里路径型行用表达式求值，类型按裸引用的核心
+        参数归一，值变化才发送。新核心宿主装载进引擎 temps 的路径变量
+        （联动页追加行）一并回传（模块自持行优先，同值去重）。
         """
+        for row in self._temp_rows:
+            name = row["name"]
+            try:
+                raw = expr.evaluate(row["expr"], self.engine.values())
+            except expr.ExprError:
+                continue          # 变量未就绪（如设备未上报），下一拍再试
+            except Exception:
+                continue
+            value = self._typed_temp(row, raw)
+            if self._last_sent.get(name) != value:
+                self.send_value(f"/{name.lstrip('/')}", value)
+                self._last_sent[name] = value
         for key, value in list(self.engine.temps.items()):
             key = str(key)
-            if "/" not in key:
+            if "/" not in key or any(r["name"] == key for r in self._temp_rows):
                 continue
             if self._last_sent.get(key) != value:
-                self.send_value(f"/{key.lstrip('/')}",
-                                self._typed_temp(key, value))
+                self.send_value(f"/{key.lstrip('/')}", value)
                 self._last_sent[key] = value
 
     _BARE_EXPR = re.compile(r"^\{([^{}]+)\}$")
 
-    def _typed_temp(self, key: str, value):
+    def _typed_temp(self, row: dict, value):
         """临时变量值按来源参数类型归一：表达式为裸 ``{核心输出参数}`` 时
         取其声明类型（Int/Bool/Float），其余（自定义表达式）原样发送。"""
+        m = self._BARE_EXPR.match(str(row.get("expr") or ""))
         kind = ""
-        row = next((r for r in getattr(self.engine, "_temp_table", ())
-                    if r.get("name") == key), None)
-        if row is not None:
-            m = self._BARE_EXPR.match(str(row.get("expr") or ""))
-            if m:
-                spec = output_spec(m.group(1).strip())
-                if spec is not None:
-                    kind = str(spec.get("type") or "")
+        if m:
+            spec = output_spec(m.group(1).strip())
+            if spec is not None:
+                kind = str(spec.get("type") or "")
         kind = kind.upper()
         try:
             if kind == "INT":
