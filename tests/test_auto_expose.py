@@ -1,8 +1,9 @@
-"""设备接入自动建临时变量（路径命名回传）回归测试。
+"""设备接入自动维护回传变量（模块维护临时变量）回归测试。
 
-口径：设备连接后模块**只建临时变量**（变量名 = 完整 OSC 回传路径，
-表达式取核心输出信号），不建事件流、不写映射表；桥接把路径型临时
-变量按变量名回传（值变化才发、按来源参数类型归一）。
+口径：设备连接后模块经 ``temp_specs`` 把设备可读参数声明为**模块
+维护**的路径命名临时变量（不落配置行、不建事件流、不写映射表）；
+桥接推送循环自动写入实时值并按变量名回传 OSC。用户在面板自建的
+带表达式路径变量由桥接自算回传。
 """
 from __future__ import annotations
 
@@ -16,13 +17,21 @@ import _bootstrap  # noqa: F401  定位 DGStudio 核心仓库
 import unittest
 
 from dglab.state import EngineState, Slot
-from modules.osc_bridge.bridge import (OscBridge, OscConfig, effective_rows)
-from modules.osc_bridge.plugin import (OSC_CONFIG_DEFAULTS, _temp_path,
-                                       OscModule, _strip_auto_cards)
+from modules.osc_bridge.bridge import (TEMP_PATH_PREFIX, OscBridge, OscConfig,
+                                       effective_rows)
+from modules.osc_bridge.plugin import OSC_CONFIG_DEFAULTS, OscModule
 
 CONFIG = {"prefix": "DGLab", "in_port": 19001,
           "device_prefixes": {"COYOTE": "DGLab", "OVC": "DGLabOvc",
                               "BMTR": "DGLabBmtr"}}
+
+
+def _path(name: str) -> str:
+    return TEMP_PATH_PREFIX + name
+
+
+def _addr(name: str) -> str:
+    return "/" + TEMP_PATH_PREFIX + name
 
 
 def _state(*slots: tuple[str, str]) -> EngineState:
@@ -48,6 +57,9 @@ class _Settings(dict):
 
 
 class _Events:
+    def __init__(self):
+        self.emitted: list[tuple] = []
+
     def on(self, *args):
         pass
 
@@ -57,22 +69,13 @@ class _Events:
     def emit(self, event, *args):
         self.emitted.append((event, *args))
 
-    def __init__(self):
-        self.emitted: list[tuple] = []
-
 
 class _Host:
-    """宿主 ModuleHost 替身：reload 记录并真实装载临时变量表。"""
-
-    def __init__(self, mod: OscModule | None = None):
-        self._mod = mod
+    def __init__(self):
         self.reloaded: list[str] = []
 
     async def reload(self, module_id: str):
         self.reloaded.append(module_id)
-        if self._mod is not None and self._mod.bridge is not None:
-            self._mod.bridge.engine.set_temp_rows(
-                self._mod.ctx.settings.get("temps"))
 
 
 class _Ctx:
@@ -81,15 +84,22 @@ class _Ctx:
         self.engine = self._Engine(state)
         self.engine.modules = _Host()
         self.events = _Events()
+        self.temps: dict[str, float] = {}
         self.log = lambda msg: None
         self.submitted = 0
+
+    def set_temp(self, key, value):
+        from dglab.mapping import as_number
+        num = as_number(value)
+        if num is not None:
+            self.temps[str(key)] = num
 
     def submit(self, coro):
         self.submitted += 1
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            asyncio.run(coro)     # 同步上下文：替身 reload 无 IO，直接跑完
+            asyncio.run(coro)
             return None
         loop.create_task(coro)
         return None
@@ -111,7 +121,6 @@ def _make_module(state=None) -> tuple[OscModule, _Ctx]:
 
 class EffectiveRowsTests(unittest.TestCase):
     def test_no_default_rows_without_config(self):
-        # 旧机制（默认直传/回传行兜底）已移除：空配置 → 引擎无任何行
         rows_in, rows_out = effective_rows({}, None)
         self.assertEqual(rows_in, [])
         self.assertEqual(rows_out, [])
@@ -128,163 +137,112 @@ class EffectiveRowsTests(unittest.TestCase):
                          ["COYOTE.Battery"])
 
 
-class TempRowTests(unittest.TestCase):
-    def test_device_connect_creates_path_temps_only(self):
+class MaintainedSpecTests(unittest.TestCase):
+    def test_specs_follow_connected_devices(self):
         mod, ctx = _make_module(_state(("c1", "COYOTE_030"),
                                        ("b1", "BMTR_1")))
-        mod._on_devices_changed(ctx.engine.get_state())
+        specs = {spec["key"]: spec for spec in mod.temp_specs()}
+        self.assertIn(_path("DGLabStrengthA"), specs)     # 郊狼强度
+        self.assertIn(_path("DGLabBmtrPressure"), specs)  # 灵猫气压
+        self.assertIn(_path("DGLabAction"), specs)        # 全局
+        self.assertFalse(any("负鼠" in str(spec["label"])
+                             for spec in specs.values()))
+        self.assertIn("模块自动维护", specs[_path("DGLabStrengthA")]["desc"])
 
-        rows = {row["name"]: row for row in ctx.settings["temps"]}
-        # 变量名 = 完整 OSC 回传路径，表达式取核心输出信号
-        self.assertEqual(rows[_temp_path("DGLabBmtrPressure")],
-                         {"name": _temp_path("DGLabBmtrPressure"),
-                          "expr": "{BMTR.Pressure}"})
-        self.assertEqual(rows[_temp_path("DGLabStrengthA")]["expr"],
-                         "{COYOTE.StrengthA}")
-        self.assertIn(_temp_path("DGLabAction"), rows)
-        self.assertIn(_temp_path("DGLabConnected"), rows)
-        # 不建事件流、不写映射表、不写记账字段
+    def test_no_state_no_specs(self):
+        mod, ctx = _make_module(None)
+        self.assertEqual(mod.temp_specs(), [])
+
+    def test_no_config_rows_written_no_ledger(self):
+        # 自动维护不落配置行、不写记账字段
+        mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
+        mod._on_devices_changed(ctx.engine.get_state())
+        self.assertNotIn("temps", ctx.settings)
+        self.assertNotIn("auto_wired", ctx.settings)
+        self.assertNotIn("auto_exposed", ctx.settings)
         self.assertNotIn("events", ctx.settings)
-        self.assertNotIn("mappings", ctx.settings)
-        self.assertNotIn("outputs", ctx.settings)
-        self.assertNotIn("auto_wired", ctx.settings)
-        # 通知宿主重载与界面刷新
-        self.assertEqual(ctx.engine.modules.reloaded, ["osc_bridge"])
-        self.assertEqual(ctx.events.emitted, [("modules_changed", "osc_bridge")])
+        self.assertEqual(ctx.events.emitted,
+                         [("modules_changed", "osc_bridge")])
 
-    def test_stale_ledger_pollution_does_not_block(self):
-        # v1.8 遗留 auto_wired 账本记满全部参数 id：不得拦截变量建立，
-        # 装载时账本清除，设备接入照常补建 temps
+    def test_stale_ledgers_cleaned_on_load_and_connect(self):
         mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
-        ctx.settings["auto_wired"] = ["COYOTE.StrengthA", "Action",
-                                      "in_strength_a", "in_emergency"]
+        ctx.settings["auto_wired"] = ["COYOTE.StrengthA"]
+        ctx.settings["auto_exposed"] = ["in_strength_a"]
         mod._on_devices_changed(ctx.engine.get_state())
         self.assertNotIn("auto_wired", ctx.settings)
-        names = {row["name"] for row in ctx.settings["temps"]}
-        self.assertIn(_temp_path("DGLabStrengthA"), names)
-        self.assertIn(_temp_path("DGLabAction"), names)
-
-    def test_existing_rows_not_duplicated(self):
-        mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
-        mod._on_devices_changed(ctx.engine.get_state())
-        snapshot = [dict(r) for r in ctx.settings["temps"]]
-        mod._on_devices_changed(ctx.engine.get_state())
-        self.assertEqual(ctx.settings["temps"], snapshot)
-
-    def test_user_renamed_or_custom_expr_counts_as_established(self):
-        mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
-        # 用户改名 + 自定义表达式：引用同一参数即视为已建立，不重建
-        ctx.settings["temps"] = [
-            {"name": _temp_path("MyStrength"), "expr": "{COYOTE.StrengthA}"},
-            {"name": _temp_path("DGLabBattery"), "expr": "{COYOTE.Battery}*2"}]
-        mod._on_devices_changed(ctx.engine.get_state())
-        rows = {row["name"]: row for row in ctx.settings["temps"]}
-        self.assertEqual(rows[_temp_path("MyStrength")]["expr"],
-                         "{COYOTE.StrengthA}")
-        self.assertEqual(rows[_temp_path("DGLabBattery")]["expr"],
-                         "{COYOTE.Battery}*2")
-        self.assertNotIn(_temp_path("DGLabStrengthA"), rows)
-        # 未建立的参数照常补齐
-        self.assertIn(_temp_path("DGLabLimitA"), rows)
-
-    def test_new_device_params_appended_on_later_connect(self):
-        mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
-        mod._on_devices_changed(ctx.engine.get_state())
-        count = len(ctx.settings["temps"])
-        mod._on_devices_changed(_state(("c1", "COYOTE_030"),
-                                       ("b1", "BMTR_1")))
-        names = {row["name"] for row in ctx.settings["temps"]}
-        self.assertGreater(len(ctx.settings["temps"]), count)
-        self.assertIn(_temp_path("DGLabBmtrPressure"), names)
+        self.assertNotIn("auto_exposed", ctx.settings)
 
 
-class StripAutoCardsTests(unittest.TestCase):
-    def test_v18_auto_cards_removed_user_cards_kept(self):
-        settings = {"events": [
-            {"name": "OSC 郊狼通道 A 强度（自动）", "trigger": "change",
-             "arg": "DGLabStrengthA", "actions": []},
-            {"name": "OSC 状态回传（自动）", "trigger": "period",
-             "arg": 50, "actions": []},
-            {"name": "我的事件", "trigger": "period", "arg": 100,
-             "actions": []},
-        ]}
-        self.assertTrue(_strip_auto_cards(settings))
-        self.assertEqual([c["name"] for c in settings["events"]], ["我的事件"])
-        self.assertFalse(_strip_auto_cards(settings))
-
-
-class PushTempsTests(unittest.TestCase):
-    def _bridge(self, temp_rows):
-        bridge = OscBridge(OscConfig(dict(CONFIG, temps=temp_rows)),
-                           lambda: None, None)
+class MaintainedPushTests(unittest.TestCase):
+    def _bridge(self, state, written=None):
+        written = {} if written is None else written
+        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: state, None,
+                           set_temp=lambda k, v: written.__setitem__(k, v))
         sent: list[tuple[str, object]] = []
         bridge.send_value = lambda addr, value: sent.append((addr, value))
-        return bridge, sent
+        return bridge, sent, written
 
-    def test_path_temps_are_sent_by_name(self):
-        bridge, sent = self._bridge([
-            {"name": _temp_path("DGLabStrengthA"),
-             "expr": "{COYOTE.StrengthA}"},
-            {"name": _temp_path("DGLabBmtrPressure"),
-             "expr": "{BMTR.Pressure}"},
-            {"name": _temp_path("DGLabConnected"),
-             "expr": "{COYOTE.Connected}"},
-            {"name": "plain_temp", "expr": "1"},          # 非路径行不回传
-            {"name": _temp_path("Broken"), "expr": "{"},  # 非法表达式跳过
-        ])
-        bridge.apply_config()
+    def test_maintained_values_written_and_sent(self):
+        state = _state(("c1", "COYOTE_030"), ("b1", "BMTR_1"))
+        state.slots["c1"].strength = {"A": 55, "B": 0}
+        state.slots["b1"].pressure = 7.9125
+        bridge, sent, written = self._bridge(state)
         try:
-            bridge.engine.signals["COYOTE.StrengthA"] = 42.0
-            bridge.engine.signals["BMTR.Pressure"] = 7.9125
-            bridge.engine.signals["COYOTE.Connected"] = 1.0
-            bridge._push_values()
-
+            bridge._push_maintained(state)
             addrs = {addr: value for addr, value in sent}
-            self.assertEqual(addrs["/avatar/parameters/DGLabStrengthA"], 42)
-            self.assertEqual(addrs["/avatar/parameters/DGLabBmtrPressure"],
-                             7.912)          # Float 三位
-            self.assertIs(addrs["/avatar/parameters/DGLabConnected"], True)
-            self.assertNotIn("/plain_temp", addrs)
-            self.assertNotIn("/avatar/parameters/Broken", addrs)
+            self.assertEqual(addrs[_addr("DGLabStrengthA")], 55)
+            self.assertEqual(addrs[_addr("DGLabBmtrPressure")], 7.912)
+            self.assertIs(addrs[_addr("DGLabConnected")], True)   # Bool 归真
+            self.assertIn(_addr("DGLabAction"), addrs)
+            self.assertEqual(addrs[_addr("DGLabAction")], 0)
+            # 同步写入共享临时变量空间（面板可见）
+            self.assertEqual(written.get(_path("DGLabStrengthA")), 55)
             # 值未变不重发
-            bridge._push_values()
-            self.assertEqual(len(sent), 3)
+            count = len(sent)
+            bridge._push_maintained(state)
+            self.assertEqual(len(sent), count)
         finally:
             bridge.close()
 
-    def test_changed_value_and_custom_expr_resend(self):
-        bridge, sent = self._bridge([
-            {"name": _temp_path("DGLabStrengthA"),
-             "expr": "{COYOTE.StrengthA} * 2"}])
-        bridge.apply_config()
-        try:
-            bridge.engine.signals["COYOTE.StrengthA"] = 10.5
-            bridge._push_values()
-            bridge.engine.signals["COYOTE.StrengthA"] = 15.0
-            bridge._push_values()
-            # 自定义（非裸引用）表达式原样发送，值变化才重发
-            self.assertEqual(sent, [("/avatar/parameters/DGLabStrengthA", 21.0),
-                                    ("/avatar/parameters/DGLabStrengthA",
-                                     30.0)])
-        finally:
-            bridge.close()
-
-    def test_device_vars_feed_evaluation(self):
-        # 核心输出参数实时值来自设备状态（device_vars），无需外部信号
+    def test_maintained_resend_on_change(self):
         state = _state(("c1", "COYOTE_030"))
-        state.slots["c1"].strength = {"A": 80, "B": 0}
-        state.slots["c1"].strength_limit = {"A": 200, "B": 200}
+        bridge, sent, _ = self._bridge(state)
+        try:
+            state.slots["c1"].strength = {"A": 10, "B": 0}
+            bridge._push_maintained(state)
+            state.slots["c1"].strength = {"A": 20, "B": 0}
+            bridge._push_maintained(state)
+            self.assertEqual([v for a, v in sent if a.endswith("StrengthA")],
+                             [10, 20])
+        finally:
+            bridge.close()
+
+    def test_no_state_is_noop(self):
+        bridge, sent, written = self._bridge(None)
+        try:
+            bridge._push_maintained(None)
+            self.assertEqual(sent, [])
+            self.assertEqual(written, {})
+        finally:
+            bridge.close()
+
+
+class UserTempRowTests(unittest.TestCase):
+    """用户自建的带表达式路径变量：桥接自算回传。"""
+
+    def test_path_temps_evaluated_and_sent(self):
         bridge = OscBridge(OscConfig(dict(CONFIG, temps=[
-            {"name": _temp_path("DGLabStrengthA"),
-             "expr": "{COYOTE.StrengthA}"}])),
-            lambda: state, None)
+            {"name": _path("DGLabStrengthA"),
+             "expr": "{COYOTE.StrengthA} * 2"},
+            {"name": "plain_temp", "expr": "1"}])), lambda: None, None)
         bridge.apply_config()
         try:
             sent: list[tuple[str, object]] = []
             bridge.send_value = lambda addr, value: sent.append((addr, value))
+            bridge.engine.signals["COYOTE.StrengthA"] = 10.5
             bridge._push_values()
-            self.assertEqual(sent,
-                             [("/avatar/parameters/DGLabStrengthA", 80)])
+            self.assertIn((_addr("DGLabStrengthA"), 21.0), sent)
+            self.assertNotIn("/plain_temp", [a for a, _v in sent])
         finally:
             bridge.close()
 
@@ -298,10 +256,9 @@ class LinkParamsTests(unittest.TestCase):
             ctx.engine.get_state, None)
         try:
             names = dict(mod.link_params())
-            self.assertIn(_temp_path("DGLabStrengthA"), names)
-            self.assertIn(_temp_path("DGLabBmtrPressure"), names)
-            self.assertIn(_temp_path("DGLabAction"), names)
-            self.assertIn("DGLabEmergency", names)   # 输入侧默认名仍可用
+            self.assertIn(_path("DGLabStrengthA"), names)
+            self.assertIn(_path("DGLabBmtrPressure"), names)
+            self.assertIn("DGLabEmergency", names)
         finally:
             mod.bridge.close()
 
@@ -324,10 +281,9 @@ class NotifyTests(unittest.TestCase):
 
 
 class EndToEndTests(unittest.IsolatedAsyncioTestCase):
-    """建变量 → 桥接自算求值 → 按路径回传 全链路（旧核心路径：宿主无
-    reload/临时变量装载能力，回传完全由模块承担）。"""
+    """建维护声明 → 桥接写共享空间 + 按路径回传 全链路（旧核心路径）。"""
 
-    async def test_temp_rows_flow_to_osc(self):
+    async def test_maintained_flow_to_osc(self):
         state = _state(("c1", "COYOTE_030"))
         state.slots["c1"].strength = {"A": 42, "B": 0}
 
@@ -347,25 +303,25 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
         cfg = OscConfig(dict(ctx.settings), defaults=OSC_CONFIG_DEFAULTS)
         mod.bridge = OscBridge(cfg, ctx.engine.get_state, Commands(),
                                events=ctx.events,
-                               on_devices_changed=mod._on_devices_changed)
+                               on_devices_changed=mod._on_devices_changed,
+                               set_temp=mod._write_temp)
         mod.bridge.log = lambda msg: None
         sent: list[tuple[str, object]] = []
         mod.bridge.send_value = lambda addr, value: sent.append((addr, value))
         await mod.bridge.start()
         try:
-            eng = mod.bridge.engine
-            mod.bridge._check_devices(state)   # 推送循环首拍会触发，这里手动加速
-            self.assertIn(_temp_path("DGLabStrengthA"),
-                          [r["name"] for r in ctx.settings["temps"]])
+            mod.bridge._check_devices(state)   # 推送循环首拍会触发
             await asyncio.sleep(0.1)
-            # 桥接自持行表已装载（不依赖宿主 reload），求值回传设备当前强度
-            self.assertIn(_temp_path("DGLabStrengthA"),
-                          [r["name"] for r in mod.bridge._temp_rows])
-            mod.bridge._push_values()
+            # 维护声明就绪（temp_specs 按设备动态）
+            self.assertIn(_path("DGLabStrengthA"),
+                          [s["key"] for s in mod.temp_specs()])
+            mod.bridge._push_maintained(state)
             addrs = {addr: value for addr, value in sent}
-            self.assertEqual(addrs["/avatar/parameters/DGLabStrengthA"], 42)
-            # 未建立事件流
+            self.assertEqual(addrs[_addr("DGLabStrengthA")], 42)
+            self.assertEqual(ctx.temps.get(_path("DGLabStrengthA")), 42)
+            # 未建立事件流、未写配置 temps 行
             self.assertEqual(ctx.settings.get("events") or [], [])
+            self.assertNotIn("temps", ctx.settings)
         finally:
             await mod.bridge.stop()
             mod.bridge.close()

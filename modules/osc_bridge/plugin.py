@@ -4,27 +4,24 @@
 不需要在配置里预声明。META["config"] 声明全部配置项，宿主装载
 config/osc.json 时自动补齐缺省。
 
-设备接入后自动把设备**可读参数**建立为**临时变量**（不建事件流、
-不写映射表）：变量名 = 完整 OSC 回传路径（如
-``avatar/parameters/DGLabBmtrPressure``），表达式取核心输出信号；
-推送循环把所有路径型临时变量按变量名回传到对应地址，**重命名变量即
-改回传地址**。变量只落在配置的 ``temps`` 字段（是否建立以现有行为
-准，不维护额外记账字段）。输入侧头像参数值经信号空间直接可用
-（联动页实时数据与变量池），派发由用户在事件流自行接线。映射表仅
-兼容旧配置（引擎只装载显式行）。OscModule 负责桥接器的生命周期
-（每次启动重建桥接器，使「修改地址/端口 → 重新开关」立即生效）。
+设备接入后自动把设备**可读参数**维护为**路径命名的临时变量**（不建
+事件流、不写映射表、不落配置行）：变量名 = 完整 OSC 回传路径（如
+``avatar/parameters/DGLabBmtrPressure``），经 ``temp_specs`` 声明为
+模块维护行（联动页面板可见），桥接推送循环自动写入实时值并按变量名
+回传 OSC，**重命名变量即改回传地址**。用户可在面板自建带表达式的
+普通路径变量（桥接同样按名自算回传）。输入侧头像参数值经信号空间
+直接可用（联动页实时数据与变量池），派发由用户在事件流自行接线。
+映射表仅兼容旧配置（引擎只装载显式行）。
 """
 
 from __future__ import annotations
 
-import re
-
 META = {
     "id": "osc_bridge",
     "name": "VRChat OSC 联动",
-    "version": "1.9.2",
-    "description": "头像参数动态建表；设备接入即把可读参数建为完整 OSC "
-                   "路径命名的临时变量并按变量名自动回传（重命名即改地址），"
+    "version": "1.10.0",
+    "description": "头像参数动态建表；设备接入即自动维护完整 OSC 路径命名的"
+                   "回传临时变量（重命名即改地址），联动页面板可见，"
                    "不建事件流、不写映射表。",
     "settings_key": "osc",
     "actions": ["osc"],
@@ -81,6 +78,7 @@ from plugins import ButtonAction, ModuleBase, spec_defaults
 from dglab.params import core_inputs as _core_inputs
 from dglab.params import output_specs as _output_specs
 from modules.osc_bridge.bridge import (OscBridge, OscConfig,
+                                       TEMP_PATH_PREFIX as _TEMP_PATH_PREFIX,
                                        default_input_name, device_osc_names)
 
 # 配置缺省值唯一来源 = META["config"] 声明，OscConfig 仅做兜底
@@ -127,6 +125,30 @@ class OscModule(ModuleBase):
                 pool.setdefault(path, f"OSC 回传路径（临时变量） · {spec['label']}")
         return sorted(pool.items())
 
+    def temp_specs(self) -> list[dict]:
+        """模块自动维护的临时变量声明：设备可读参数 → 路径命名回传变量。
+
+        变量名 = 完整 OSC 回传路径（``avatar/parameters/<默认参数名>``），
+        值由桥接推送循环自动写入（模块维护，无表达式），并按变量名回传
+        OSC；用户重命名即改回传地址（在面板中编辑该行即转为普通变量）。
+        """
+        if self.ctx is None:
+            return []
+        try:
+            state = self.ctx.engine.get_state()
+        except Exception:
+            return []
+        if state is None:
+            return []
+        settings = self.ctx.settings
+        specs: list[dict] = []
+        for spec in _wired_outputs(settings, state):
+            specs.append({"key": _temp_path(spec["name"]),
+                          "label": str(spec["label"]),
+                          "desc": f"模块自动维护（{spec['type']}）· "
+                                  f"按变量名回传 {_TEMP_PATH_PREFIX}…"})
+        return specs
+
     def on_load(self, ctx) -> None:
         self.ctx = ctx
         migrate_legacy(ctx.settings)
@@ -159,6 +181,7 @@ class OscModule(ModuleBase):
             self.ctx.engine,
             events=self.ctx.events,
             on_devices_changed=self._on_devices_changed,
+            set_temp=self._write_temp,
         )
         self.bridge.log = self.ctx.log
         await self.bridge.start()
@@ -208,39 +231,26 @@ class OscModule(ModuleBase):
         self.ctx.log(f"OSC {address} = {value}")
 
     def _on_devices_changed(self, state) -> None:
-        """设备集变化 → 把设备可读参数建立为路径命名的临时变量（桥接回调）。
+        """设备集变化 → 通知联动页刷新维护参数声明（桥接推送循环回调）。
 
-        只建临时变量，不建事件流、不写映射表：变量名 = 完整 OSC 回传路径
-        （``avatar/parameters/<默认参数名>``），表达式取核心输出信号，
-        桥接推送循环按变量名自算回传。判断依据是 temps 里是否已有引用
-        该参数的行（表达式 ``{参数id}``，改名/改表达式均算已建立），
-        不维护额外记账字段。
+        自动维护的临时变量由 :meth:`temp_specs` 按接入设备动态声明、由
+        桥接写入与回传，无需写配置；此处仅清理历史记账字段并让界面
+        重建（新版核心面板即见新设备的维护行）。
         """
         settings = self.ctx.settings
-        rows = [r for r in (settings.get("temps") or [])
-                if isinstance(r, dict)]
-        if "auto_wired" in settings:      # v1.8/v1.9 记账本，已废弃：清除
-            settings.pop("auto_wired")
-        referenced = set()
-        for row in rows:
-            for m in _BARE_REF.finditer(str(row.get("expr") or "")):
-                referenced.add(m.group(1))
-        changed = False
-        for spec in _wired_outputs(settings, state):
-            if spec["key"] in referenced:
-                continue
-            rows.append({"name": _temp_path(spec["name"]),
-                         "expr": "{" + spec["key"] + "}"})
-            referenced.add(spec["key"])
-            changed = True
-        if not changed:
-            return
-        settings["temps"] = rows
-        self._sync_temps()
-        self._reload_logic()
+        for stale in ("auto_exposed", "auto_wired"):   # 历史记账，废弃即清
+            if stale in settings:
+                settings.pop(stale)
         bus = getattr(self.ctx, "events", None)
         if bus is not None:
+            # 设备变化 = 维护参数集变化，界面需要重建（temp_specs 动态）
             bus.emit("modules_changed", self.id)
+
+    def _write_temp(self, key, value) -> None:
+        """维护值 → 宿主共享临时变量空间（发行版核心无 set_temp 时跳过）。"""
+        set_temp = getattr(self.ctx, "set_temp", None)
+        if set_temp is not None:
+            set_temp(str(key), value)
 
     def _sync_temps(self) -> None:
         """把配置临时变量同步进桥接并重载（模块自算回传立即生效）。"""
@@ -289,12 +299,7 @@ def migrate_legacy(settings) -> bool:
     return changed
 
 
-# 回传临时变量的命名前缀：变量名 = OSC 地址（去开头 /），桥接按名回传
-_TEMP_PATH_PREFIX = "avatar/parameters/"
-
-# 表达式中的参数引用（判定 temps 行是否已暴露某核心参数，
-# 如 "{BMTR.Pressure}"、"{COYOTE.Battery}*2" 均引用 COYOTE.Battery 时算建立）
-_BARE_REF = re.compile(r"\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\}")
+# 回传临时变量的命名前缀由 bridge.TEMP_PATH_PREFIX 提供（模块与桥接共用）
 
 
 def _temp_path(avatar_name: str) -> str:

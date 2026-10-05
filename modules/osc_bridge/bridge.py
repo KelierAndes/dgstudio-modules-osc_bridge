@@ -38,7 +38,26 @@ from dglab.waves import wave_order
 __all__ = ["OscBridge", "OscConfig", "device_osc_names", "wave_order",
            "output_map_key", "signal_specs", "OUT_SIGNALS",
            "default_input_rows", "default_output_rows", "effective_rows",
-           "default_input_name", "default_output_name"]
+           "default_input_name", "default_output_name", "TEMP_PATH_PREFIX"]
+
+# 回传临时变量的命名前缀：变量名 = OSC 地址（去开头 /），桥接按名回传
+TEMP_PATH_PREFIX = "avatar/parameters/"
+
+
+def _typed_value(kind: str, raw):
+    """按声明类型归一输出值：Int 取整、Bool 正值归真、Float 保留三位，
+    其余原样。"""
+    k = str(kind or "").upper()
+    try:
+        if k == "INT":
+            return int(round(float(raw)))
+        if k == "BOOL":
+            return bool(float(raw) > 1e-9)
+        if k == "FLOAT":
+            return round(float(raw), 3)
+    except (TypeError, ValueError):
+        pass
+    return raw
 
 
 class OscConfig(dict):
@@ -67,12 +86,15 @@ class OscConfig(dict):
 
 class OscBridge:
     def __init__(self, config: OscConfig, get_state, commands, events=None,
-                 on_devices_changed=None):
+                 on_devices_changed=None, set_temp=None):
         self.config = config
         self.get_state = get_state
         self.commands = commands
-        # 设备集变化回调：fn(state)，模块据此把设备可读参数建为路径命名
-        # 的临时变量（见 plugin._on_devices_changed）
+        # 设备集变化回调：fn(state)，模块据此刷新维护参数声明（见 plugin）
+        self._on_devices_changed = on_devices_changed
+        # 共享临时变量写入回调：fn(变量名, 数值)，模块维护的回传参数写入
+        # 宿主共享空间（新版核心面板可见；发行版无此能力时跳过）
+        self._set_temp = set_temp
         self._on_devices_changed = on_devices_changed
 
         self._client = SimpleUDPClient(config["out_ip"], int(config["out_port"]))
@@ -340,8 +362,9 @@ class OscBridge:
             while self._running:
                 await asyncio.sleep(interval)
                 state = self._safe_state()
-                self._check_devices(state)  # 接入设备变化时通知模块接线
+                self._check_devices(state)  # 接入设备变化时通知模块刷新
                 self.engine.pump()
+                self._push_maintained(state)
                 self._push_values()
                 tick += 1
                 if tick % 10 == 0:
@@ -383,6 +406,47 @@ class OscBridge:
                                  (self._out_ip, int(self.config["out_port"])))
         except Exception:
             pass
+
+    def _push_maintained(self, state) -> None:
+        """模块自动维护的回传参数：设备可读参数 → 路径命名临时变量。
+
+        变量名 = ``avatar/parameters/<默认参数名>``，值取核心输出参数实时
+        值并按声明类型归一；写入共享临时变量空间（新版核心联动页可见，
+        发行版无此能力时跳过），并按变量名回传 OSC（值变化才发送）。
+        """
+        if state is None:
+            return
+        try:
+            names = device_osc_names(state,
+                                     self.config.get("device_prefixes") or {})
+            vals = device_state_values(state)
+        except Exception:
+            return
+        for sid in sorted(names):
+            info = names[sid]
+            for spec in output_specs(info["family"],
+                                     int(info.get("index", 1))):
+                if spec["key"] in vals:
+                    self._maintain_temp(f"{info['name']}{spec['signal']}",
+                                        spec["type"], vals[spec["key"]])
+        self._maintain_temp(f"{self.config.get('prefix') or 'DGLab'}Action",
+                            "Int",
+                            float(self._action_value
+                                  if time.monotonic() < self._action_until
+                                  else 0))
+
+    def _maintain_temp(self, avatar_name: str, kind: str, raw) -> None:
+        name = f"{TEMP_PATH_PREFIX}{str(avatar_name or '').lstrip('/')}"
+        value = _typed_value(kind, raw)
+        writer = self._set_temp
+        if writer is not None:
+            try:
+                writer(name, value)
+            except Exception as exc:
+                self.log(f"[OSC] 临时变量写入 {name} 失败: {exc!r}")
+        if self._last_sent.get(name) != value:
+            self.send_value(f"/{name.lstrip('/')}", value)
+            self._last_sent[name] = value
 
     def _push_values(self) -> None:
         for name, value in self.engine.out_values.items():
