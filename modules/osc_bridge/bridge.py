@@ -1,17 +1,21 @@
-"""VRChat OSC 桥接：动态参数表 + 事件流/临时变量接线。
+"""VRChat OSC 桥接：动态参数表 + 路径命名临时变量回传。
 
 头像侧参数是**动态定义**的：任何收到的 ``/avatar/parameters/<名称>`` 都以
-``<名称>`` 建立同名参数进入模块参数表，并镜像进共享临时变量空间 —— 模块
-不需要预声明头像参数名。设备参数的核心接线由模块在设备接入时以**事件流
-卡片**建立（输入 = 变量变更时直派核心输入参数，输出 = 周期把核心输出
-信号写入临时变量与回传表），联动页可自由编辑；映射表（``mappings`` /
-``outputs``）仅保留引擎装载接口兼容旧配置，不再自动生成默认行。
+``<名称>`` 建立同名参数进入模块参数表 —— 模块不需要预声明头像参数名。
+
+回传通道：设备可读参数由模块建为**完整路径命名的临时变量**（变量名 =
+OSC 地址，如 ``avatar/parameters/DGLabStrengthA``，表达式取核心输出
+信号），推送循环把所有含 ``/`` 的临时变量按变量名回传（值变化才发、
+按来源参数类型归一）；用户重命名变量即改回传地址。事件流与映射表
+（``mappings`` / ``outputs``）仅保留引擎装载接口兼容用户自建/旧配置，
+模块不再自动生成。
 """
 
 from __future__ import annotations
 
 import asyncio
 import copy
+import re
 import socket
 import threading
 import time
@@ -62,17 +66,13 @@ class OscConfig(dict):
 
 class OscBridge:
     def __init__(self, config: OscConfig, get_state, commands, events=None,
-                 on_devices_changed=None, set_temp=None):
+                 on_devices_changed=None):
         self.config = config
         self.get_state = get_state
         self.commands = commands
-        # 设备集变化回调：fn(state)，模块据此以事件流+临时变量接线新设备
-        # 参数（见 plugin._on_devices_changed）
+        # 设备集变化回调：fn(state)，模块据此把设备可读参数建为路径命名
+        # 的临时变量（见 plugin._on_devices_changed）
         self._on_devices_changed = on_devices_changed
-        # 收包镜像回调：fn(参数名, 数值)，把头像参数值写入宿主共享临时
-        # 变量空间（联动页「模块维护」行可见可引用）
-        self._set_temp = set_temp
-        self._mirrored: set[str] = set()
 
         self._client = SimpleUDPClient(config["out_ip"], int(config["out_port"]))
         self._dispatcher = Dispatcher()
@@ -153,35 +153,12 @@ class OscBridge:
         if str(addr) == "/avatar/change":
             self._last_sent.clear()
             self.engine.reset()
-            self._clear_mirrored_temps()
             return
         if not args:
             return
         name = str(addr).rstrip("/").rsplit("/", 1)[-1]
         self.input_values[name] = {"value": args[0], "ts": time.monotonic()}
         self.engine.signal(name, args[0])
-        self._mirror_temp(name, args[0])
-
-    def _mirror_temp(self, name: str, value) -> None:
-        """头像参数值镜像进共享临时变量空间（面板可见、事件可引用）。"""
-        if self._set_temp is None:
-            return
-        try:
-            self._set_temp(name, value)
-            self._mirrored.add(name)
-        except Exception as exc:
-            self.log(f"[OSC] 临时变量镜像 {name} 失败: {exc!r}")
-
-    def _clear_mirrored_temps(self) -> None:
-        """换头像时清零已镜像的临时变量，避免旧值残留驱动事件。"""
-        if self._set_temp is None or not self._mirrored:
-            return
-        for name in self._mirrored:
-            try:
-                self._set_temp(name, 0)
-            except Exception:
-                pass
-        self._mirrored.clear()
 
     def param_names(self, max_age_s: float = 120.0) -> list[str]:
         """动态参数表内的参数名（联动页表达式变量池）。"""
@@ -384,6 +361,49 @@ class OscBridge:
             if self._last_sent.get(name) != value:
                 self._send_param(name, value)
                 self._last_sent[name] = value
+        self._push_temps()
+
+    def _push_temps(self) -> None:
+        """把路径命名的临时变量（变量名含 ``/``）回传到对应 OSC 地址。
+
+        变量名即回传地址（去掉开头 ``/`` 后补全），如临时变量
+        ``avatar/parameters/DGLabStrengthA`` → 发送
+        ``/avatar/parameters/DGLabStrengthA``；用户重命名变量即改地址。
+        """
+        for key, value in list(self.engine.temps.items()):
+            key = str(key)
+            if "/" not in key:
+                continue
+            if self._last_sent.get(key) != value:
+                self.send_value(f"/{key.lstrip('/')}",
+                                self._typed_temp(key, value))
+                self._last_sent[key] = value
+
+    _BARE_EXPR = re.compile(r"^\{([^{}]+)\}$")
+
+    def _typed_temp(self, key: str, value):
+        """临时变量值按来源参数类型归一：表达式为裸 ``{核心输出参数}`` 时
+        取其声明类型（Int/Bool/Float），其余（自定义表达式）原样发送。"""
+        kind = ""
+        row = next((r for r in getattr(self.engine, "_temp_table", ())
+                    if r.get("name") == key), None)
+        if row is not None:
+            m = self._BARE_EXPR.match(str(row.get("expr") or ""))
+            if m:
+                spec = output_spec(m.group(1).strip())
+                if spec is not None:
+                    kind = str(spec.get("type") or "")
+        kind = kind.upper()
+        try:
+            if kind == "INT":
+                return int(round(float(value)))
+            if kind == "BOOL":
+                return bool(float(value) > 1e-9)
+            if kind == "FLOAT":
+                return round(float(value), 3)
+        except (TypeError, ValueError):
+            pass
+        return value
 
     def _send_param(self, name: str, value) -> None:
         """把模块侧参数名写回头像参数（pythonosc 按 Python 值类型推断 OSC 类型）。"""

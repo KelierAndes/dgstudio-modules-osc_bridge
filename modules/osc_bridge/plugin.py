@@ -4,28 +4,24 @@
 不需要在配置里预声明。META["config"] 声明全部配置项，宿主装载
 config/osc.json 时自动补齐缺省。
 
-设备接入后自动向核心暴露该设备全部可写/可读参数，**以事件流 + 临时变量
-形式接线，不写映射表**：
-
-* 输入值（vrc 侧参数 → 设备可写参数）：收包值镜像进共享临时变量空间
-  （``temp_specs`` 声明为模块维护行），每个核心输入参数建一张
-  「变量变更时」事件卡片直派（首拍采基线，不重刷同值、不强推 0）；
-* 输出值（核心可读参数 → vrc 侧）：一张周期事件卡片把核心输出信号
-  实时值写入临时变量并回传（``out_values`` → OSC 发送按值变化去重）。
-
-接线以参数 id 记账（``auto_wired``）：用户删除过的动作不复活，卡片与
-变量均可联动页编辑。映射表仅兼容旧配置（引擎只装载显式行，无默认兜底）。
-OscModule 负责桥接器的生命周期（每次启动重建桥接器，
-使「修改地址/端口 → 重新开关」立即生效）。
+设备接入后自动把设备**可读参数**建立为**临时变量**（不建事件流、
+不写映射表）：变量名 = 完整 OSC 回传路径（如
+``avatar/parameters/DGLabBmtrPressure``），表达式取核心输出信号；
+推送循环把所有路径型临时变量按变量名回传到对应地址，**重命名变量即
+改回传地址**。临时变量以参数 id 记账（auto_wired）：用户删除/改名过
+的变量不重复建立。输入侧头像参数值经信号空间直接可用（联动页实时
+数据与变量池），派发由用户在事件流自行接线。映射表仅兼容旧配置
+（引擎只装载显式行）。OscModule 负责桥接器的生命周期（每次启动重建
+桥接器，使「修改地址/端口 → 重新开关」立即生效）。
 """
 
 META = {
     "id": "osc_bridge",
     "name": "VRChat OSC 联动",
-    "version": "1.8.0",
-    "description": "头像参数动态建表；设备接入即以事件流与临时变量自动接线"
-                   "（输入按变量变更直派设备，输出按周期回传头像参数），"
-                   "联动页可自由编辑，不再使用映射表。",
+    "version": "1.9.0",
+    "description": "头像参数动态建表；设备接入即把可读参数建为完整 OSC "
+                   "路径命名的临时变量并按变量名自动回传（重命名即改地址），"
+                   "不建事件流、不写映射表。",
     "settings_key": "osc",
     "actions": ["osc"],
     "default_enabled": False,
@@ -102,7 +98,7 @@ class OscModule(ModuleBase):
         return META["config"]
 
     def link_params(self) -> list[tuple[str, str]]:
-        """动态参数表：近期收到的头像参数 + 已接入设备的默认参数名。"""
+        """动态参数表：近期收到的头像参数 + 已接入设备的默认参数名与路径。"""
         if self.bridge is None:
             return []
         pool: dict[str, str] = {}
@@ -115,48 +111,23 @@ class OscModule(ModuleBase):
         except Exception:
             state = None
         if state is not None:
-            # 接入设备的默认头像参数名也进入变量池：未收到任何 OSC 包时
-            # 事件卡片与表达式同样可以点选
+            # 接入设备的默认名与回传路径也进入变量池：未收到任何 OSC 包
+            # 时事件动作与表达式同样可以点选
             settings = self.ctx.settings
             for spec in _wired_inputs(settings, state):
                 name = default_input_name(settings, spec["key"])
                 pool.setdefault(name, f"头像参数默认名 · {name}")
             for spec in _wired_outputs(settings, state):
+                path = _temp_path(spec["name"])
                 pool.setdefault(spec["name"], f"头像参数默认名 · {spec['name']}")
+                pool.setdefault(path, f"OSC 回传路径（临时变量） · {spec['label']}")
         return sorted(pool.items())
-
-    def temp_specs(self) -> list[dict]:
-        """模块维护的临时变量声明：设备接入后自动暴露的输入/输出值。
-
-        输入值由桥接收包镜像写入（``ctx.set_temp``），输出值由周期事件
-        卡片的输出动作写入——联动页「临时变量」面板显示为模块维护行。
-        """
-        if self.ctx is None:
-            return []
-        try:
-            state = self.ctx.engine.get_state()
-        except Exception:
-            return []
-        if state is None:
-            return []
-        settings = self.ctx.settings
-        specs: dict[str, dict] = {}
-        for spec in _wired_inputs(settings, state):
-            # 输入/输出默认参数名可能同名（如 DGLabStrengthA 双向），
-            # 以输入侧声明为准，避免联动页重复行
-            specs.setdefault(default_input_name(settings, spec["key"]),
-                             {"label": str(spec["label"]),
-                              "desc": "OSC 收包写入（模块维护），事件输入动作可引用"})
-        for spec in _wired_outputs(settings, state):
-            specs.setdefault(spec["name"],
-                             {"label": str(spec["label"]),
-                              "desc": f"事件输出动作写入（{spec['type']}）· 随 OSC 回传"})
-        return [{"key": key, **item} for key, item in specs.items()]
 
     def on_load(self, ctx) -> None:
         self.ctx = ctx
         migrate_legacy(ctx.settings)
         materialize_names(ctx.settings)
+        _strip_auto_cards(ctx.settings)      # v1.8 事件卡片接线，已废弃
         if "auto_exposed" in ctx.settings:   # v1.7 映射表记账本，已废弃
             ctx.settings.pop("auto_exposed")
 
@@ -181,7 +152,6 @@ class OscModule(ModuleBase):
             self.ctx.engine,
             events=self.ctx.events,
             on_devices_changed=self._on_devices_changed,
-            set_temp=self._mirror_temp,
         )
         self.bridge.log = self.ctx.log
         await self.bridge.start()
@@ -230,49 +200,31 @@ class OscModule(ModuleBase):
         self.ctx.log(f"OSC {address} = {value}")
 
     def _on_devices_changed(self, state) -> None:
-        """设备集变化 → 以事件流 + 临时变量接线新设备参数（桥接回调）。
+        """设备集变化 → 把设备可读参数建立为路径命名的临时变量（桥接回调）。
 
-        输入：每个核心输入参数一张「变量变更时」卡片（首拍采基线，不重刷
-        同值、不强推 0）；输出：单张周期卡片把核心输出信号写入临时变量并
-        回传。以参数 id 记账（auto_wired）：用户删除过的动作不复活。
+        只建临时变量，不建事件流、不写映射表：变量名 = 完整 OSC 回传路径
+        （``avatar/parameters/<默认参数名>``），表达式取核心输出信号，
+        桥接推送循环按变量名回传。以参数 id 记账（auto_wired）：用户删除
+        或改名过的变量不重复建立。
         """
         settings = self.ctx.settings
         wired = {str(x) for x in (settings.get("auto_wired") or [])}
-        cards = [e for e in (settings.get("events") or [])
-                 if isinstance(e, dict)]
+        rows = [r for r in (settings.get("temps") or [])
+                if isinstance(r, dict)]
+        used = {str(r.get("name") or "").strip() for r in rows}
         changed = False
-        for spec in _wired_inputs(settings, state):
-            if spec["key"] in wired:
-                continue
-            name = default_input_name(settings, spec["key"])
-            cards.append({"name": f"OSC {spec['label']}（自动）",
-                          "trigger": "change", "arg": name,
-                          "actions": [{"dir": "in", "param": spec["key"],
-                                       "var": name}]})
-            wired.add(spec["key"])
-            changed = True
-        new_outs = []
         for spec in _wired_outputs(settings, state):
             if spec["key"] in wired:
                 continue
-            new_outs.append({"dir": "out", "param": spec["key"],
-                             "var": spec["name"], "name": spec["name"],
-                             "type": spec["type"]})
+            path = _temp_path(spec["name"])
+            if path not in used:
+                rows.append({"name": path,
+                             "expr": "{" + spec["key"] + "}"})
+                changed = True
             wired.add(spec["key"])
-            changed = True
-        if new_outs:
-            card = next((e for e in cards if e.get("name") == _OUT_CARD), None)
-            if card is None:
-                card = {"name": _OUT_CARD, "trigger": "period", "arg": 50,
-                        "actions": []}
-                cards.append(card)
-            card["actions"] = list(card.get("actions") or []) + new_outs
-        if "auto_exposed" in settings:      # v1.7 映射表记账本，已废弃
-            settings.pop("auto_exposed")
-            changed = True
         if not changed:
             return
-        settings["events"] = cards
+        settings["temps"] = rows
         settings["auto_wired"] = sorted(wired)
         self._reload_logic()
         bus = getattr(self.ctx, "events", None)
@@ -289,12 +241,6 @@ class OscModule(ModuleBase):
             self.ctx.submit(reload_fn(self.id))
         except Exception as exc:
             self.ctx.log(f"重载事件流/临时变量失败: {exc!r}")
-
-    def _mirror_temp(self, key, value) -> None:
-        """收包值 → 宿主共享临时变量空间（老宿主无 set_temp 时跳过）。"""
-        set_temp = getattr(self.ctx, "set_temp", None)
-        if set_temp is not None:
-            set_temp(str(key), value)
 
 
 def migrate_legacy(settings) -> bool:
@@ -320,8 +266,26 @@ def migrate_legacy(settings) -> bool:
     return changed
 
 
-# 输出接线共用的事件卡片名（模块维护，设备变化时向其追加输出动作）
-_OUT_CARD = "OSC 状态回传（自动）"
+# 回传临时变量的命名前缀：变量名 = OSC 地址（去开头 /），桥接按名回传
+_TEMP_PATH_PREFIX = "avatar/parameters/"
+
+
+def _temp_path(avatar_name: str) -> str:
+    """头像参数名 → 完整回传路径临时变量名。"""
+    return _TEMP_PATH_PREFIX + str(avatar_name or "").lstrip("/")
+
+
+def _strip_auto_cards(settings) -> bool:
+    """移除 v1.8 自动创建的事件卡片（OSC …（自动）），改由临时变量回传。"""
+    cards = [r for r in (settings.get("events") or [])
+             if isinstance(r, dict)]
+    kept = [r for r in cards
+            if not (str(r.get("name") or "").startswith("OSC ")
+                    and str(r.get("name") or "").endswith("（自动）"))]
+    if len(kept) != len(cards):
+        settings["events"] = kept
+        return True
+    return False
 
 
 def _wired_inputs(settings, state) -> list[dict]:

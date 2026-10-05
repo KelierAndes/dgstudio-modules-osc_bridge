@@ -1,7 +1,8 @@
-"""设备接入自动接线（事件流 + 临时变量）回归测试。
+"""设备接入自动建临时变量（路径命名回传）回归测试。
 
-口径：设备连接后模块**不写映射表**，而是以事件流卡片 + 模块维护临时
-变量暴露设备全部可写/可读参数；引擎仅装载显式配置行，无默认兜底。
+口径：设备连接后模块**只建临时变量**（变量名 = 完整 OSC 回传路径，
+表达式取核心输出信号），不建事件流、不写映射表；桥接把路径型临时
+变量按变量名回传（值变化才发、按来源参数类型归一）。
 """
 from __future__ import annotations
 
@@ -16,7 +17,8 @@ import unittest
 
 from dglab.state import EngineState, Slot
 from modules.osc_bridge.bridge import (OscBridge, OscConfig, effective_rows)
-from modules.osc_bridge.plugin import OSC_CONFIG_DEFAULTS, _OUT_CARD, OscModule
+from modules.osc_bridge.plugin import (OSC_CONFIG_DEFAULTS, _temp_path,
+                                       OscModule, _strip_auto_cards)
 
 CONFIG = {"prefix": "DGLab", "in_port": 19001,
           "device_prefixes": {"COYOTE": "DGLab", "OVC": "DGLabOvc",
@@ -60,13 +62,17 @@ class _Events:
 
 
 class _Host:
-    """宿主 ModuleHost 替身：reload 记录（不真正装载逻辑表）。"""
+    """宿主 ModuleHost 替身：reload 记录并真实装载临时变量表。"""
 
-    def __init__(self):
+    def __init__(self, mod: OscModule | None = None):
+        self._mod = mod
         self.reloaded: list[str] = []
 
     async def reload(self, module_id: str):
         self.reloaded.append(module_id)
+        if self._mod is not None and self._mod.bridge is not None:
+            self._mod.bridge.engine.set_temp_rows(
+                self._mod.ctx.settings.get("temps"))
 
 
 class _Ctx:
@@ -75,15 +81,8 @@ class _Ctx:
         self.engine = self._Engine(state)
         self.engine.modules = _Host()
         self.events = _Events()
-        self.temps: dict[str, float] = {}
         self.log = lambda msg: None
         self.submitted = 0
-
-    def set_temp(self, key, value):
-        from dglab.mapping import as_number
-        num = as_number(value)
-        if num is not None:
-            self.temps[str(key)] = num
 
     def submit(self, coro):
         self.submitted += 1
@@ -129,120 +128,131 @@ class EffectiveRowsTests(unittest.TestCase):
                          ["COYOTE.Battery"])
 
 
-class WireTests(unittest.TestCase):
-    def test_device_connect_wires_events_not_mappings(self):
+class TempRowTests(unittest.TestCase):
+    def test_device_connect_creates_path_temps_only(self):
         mod, ctx = _make_module(_state(("c1", "COYOTE_030"),
                                        ("b1", "BMTR_1")))
         mod._on_devices_changed(ctx.engine.get_state())
 
-        cards = ctx.settings["events"]
-        by_name = {card["name"]: card for card in cards}
-        # 输入：每个核心输入参数一张「变量变更时」卡片（郊狼 11 + 急停）
-        in_card = by_name["OSC 郊狼通道 A 强度（自动）"]
-        self.assertEqual(in_card["trigger"], "change")
-        self.assertEqual(in_card["arg"], "DGLabStrengthA")
-        self.assertEqual(in_card["actions"],
-                         [{"dir": "in", "param": "in_strength_a",
-                           "var": "DGLabStrengthA"}])
-        self.assertIn("OSC 急停（全部设备）（自动）", by_name)
-        self.assertEqual(by_name["OSC 急停（全部设备）（自动）"]["arg"],
-                         "DGLabEmergency")
-        # 不应有负鼠（OVC）输入卡片
-        self.assertFalse(any("负鼠" in name for name in by_name))
-        # 输出：单张周期卡片，含郊狼/灵猫全部可读参数与全局 Action
-        out_card = by_name[_OUT_CARD]
-        self.assertEqual(out_card["trigger"], "period")
-        actions = {a["param"]: a for a in out_card["actions"]}
-        self.assertEqual(actions["BMTR.Pressure"],
-                         {"dir": "out", "param": "BMTR.Pressure",
-                          "var": "DGLabBmtrPressure",
-                          "name": "DGLabBmtrPressure", "type": "Float"})
-        self.assertEqual(actions["COYOTE.StrengthA"]["var"], "DGLabStrengthA")
-        self.assertIn("Action", actions)
-        # 映射表保持未写
+        rows = {row["name"]: row for row in ctx.settings["temps"]}
+        # 变量名 = 完整 OSC 回传路径，表达式取核心输出信号
+        self.assertEqual(rows[_temp_path("DGLabBmtrPressure")],
+                         {"name": _temp_path("DGLabBmtrPressure"),
+                          "expr": "{BMTR.Pressure}"})
+        self.assertEqual(rows[_temp_path("DGLabStrengthA")]["expr"],
+                         "{COYOTE.StrengthA}")
+        self.assertIn(_temp_path("DGLabAction"), rows)
+        self.assertIn(_temp_path("DGLabConnected"), rows)
+        # 不建事件流、不写映射表
+        self.assertNotIn("events", ctx.settings)
         self.assertNotIn("mappings", ctx.settings)
         self.assertNotIn("outputs", ctx.settings)
         # 记账 + 通知宿主重载与界面刷新
-        self.assertIn("in_strength_a", ctx.settings["auto_wired"])
         self.assertIn("BMTR.Pressure", ctx.settings["auto_wired"])
+        self.assertIn("Action", ctx.settings["auto_wired"])
         self.assertEqual(ctx.engine.modules.reloaded, ["osc_bridge"])
         self.assertEqual(ctx.events.emitted, [("modules_changed", "osc_bridge")])
 
     def test_second_call_is_noop(self):
         mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
         mod._on_devices_changed(ctx.engine.get_state())
-        count = len(ctx.settings["events"])
+        count = len(ctx.settings["temps"])
         mod._on_devices_changed(ctx.engine.get_state())
-        self.assertEqual(len(ctx.settings["events"]), count)
+        self.assertEqual(len(ctx.settings["temps"]), count)
         self.assertEqual(ctx.engine.modules.reloaded, ["osc_bridge"])
 
-    def test_user_edits_survive(self):
+    def test_user_renames_and_deletes_survive(self):
         mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
         mod._on_devices_changed(ctx.engine.get_state())
-        # 用户删除急停卡片与一个输出动作 → 记账在，设备变化不复活
-        ctx.settings["events"] = [
-            card for card in ctx.settings["events"]
-            if card["name"] != "OSC 急停（全部设备）（自动）"]
-        out_card = next(card for card in ctx.settings["events"]
-                        if card["name"] == _OUT_CARD)
-        out_card["actions"] = [a for a in out_card["actions"]
-                               if a["param"] != "COYOTE.Battery"]
+        # 用户改名（自定义回传地址）与删除各一行
+        rows = ctx.settings["temps"]
+        for row in rows:
+            if row["name"] == _temp_path("DGLabStrengthA"):
+                row["name"] = _temp_path("MyStrength")
+        ctx.settings["temps"] = [row for row in rows
+                                 if row["name"] != _temp_path("DGLabBattery")]
         mod._on_devices_changed(_state(("c1", "COYOTE_030"),
                                        ("b1", "BMTR_1")))
-        names = [card["name"] for card in ctx.settings["events"]]
-        self.assertNotIn("OSC 急停（全部设备）（自动）", names)
-        out_card = next(card for card in ctx.settings["events"]
-                        if card["name"] == _OUT_CARD)
-        self.assertNotIn("COYOTE.Battery",
-                         [a["param"] for a in out_card["actions"]])
-        # 新设备（灵猫）参数照常补齐
-        self.assertIn("BMTR.Pressure",
-                      [a["param"] for a in out_card["actions"]])
+        names = {row["name"] for row in ctx.settings["temps"]}
+        self.assertIn(_temp_path("MyStrength"), names)      # 改名保留
+        self.assertNotIn(_temp_path("DGLabStrengthA"), names)  # 不重建默认名
+        self.assertNotIn(_temp_path("DGLabBattery"), names)  # 删除不复活
+        # 新设备（灵猫）变量照常补齐
+        self.assertIn(_temp_path("DGLabBmtrPressure"), names)
 
 
-class TempSpecsTests(unittest.TestCase):
-    def test_specs_follow_connected_devices(self):
-        mod, ctx = _make_module(_state(("c1", "COYOTE_030"),
-                                       ("b1", "BMTR_1")))
-        specs = {spec["key"]: spec for spec in mod.temp_specs()}
-        self.assertEqual(specs["DGLabStrengthA"]["label"], "郊狼通道 A 强度")
-        self.assertEqual(specs["DGLabBmtrPressure"]["label"], "灵猫气压 (kPa)")
-        self.assertIn("DGLabAction", specs)
-        self.assertFalse(any("负鼠" in str(spec["label"])
-                             for spec in specs.values()))
+class StripAutoCardsTests(unittest.TestCase):
+    def test_v18_auto_cards_removed_user_cards_kept(self):
+        settings = {"events": [
+            {"name": "OSC 郊狼通道 A 强度（自动）", "trigger": "change",
+             "arg": "DGLabStrengthA", "actions": []},
+            {"name": "OSC 状态回传（自动）", "trigger": "period",
+             "arg": 50, "actions": []},
+            {"name": "我的事件", "trigger": "period", "arg": 100,
+             "actions": []},
+        ]}
+        self.assertTrue(_strip_auto_cards(settings))
+        self.assertEqual([c["name"] for c in settings["events"]], ["我的事件"])
+        self.assertFalse(_strip_auto_cards(settings))
 
-    def test_no_state_no_specs(self):
-        mod, ctx = _make_module(None)
-        self.assertEqual(mod.temp_specs(), [])
 
+class PushTempsTests(unittest.TestCase):
+    def _bridge(self):
+        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: None, None)
+        sent: list[tuple[str, object]] = []
+        bridge.send_value = lambda addr, value: sent.append((addr, value))
+        return bridge, sent
 
-class MirrorTests(unittest.TestCase):
-    def test_received_params_mirror_to_temps(self):
-        seen: dict[str, float] = {}
-        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: None, None,
-                           set_temp=lambda k, v: seen.__setitem__(k, v))
+    def test_path_temps_are_sent_by_name(self):
+        bridge, sent = self._bridge()
         try:
-            bridge._track_input("/avatar/parameters/DGLabStrengthA", 42)
-            self.assertEqual(seen.get("DGLabStrengthA"), 42)
-            self.assertIn("DGLabStrengthA", bridge._mirrored)
+            eng = bridge.engine
+            eng._temp_table = [
+                {"name": _temp_path("DGLabStrengthA"),
+                 "expr": "{COYOTE.StrengthA}"},
+                {"name": _temp_path("DGLabBmtrPressure"),
+                 "expr": "{BMTR.Pressure}"},
+                {"name": _temp_path("DGLabConnected"),
+                 "expr": "{COYOTE.Connected}"},
+                {"name": "plain_temp", "expr": "1"},
+            ]
+            eng.temps[_temp_path("DGLabStrengthA")] = 42.0
+            eng.temps[_temp_path("DGLabBmtrPressure")] = 7.9125
+            eng.temps[_temp_path("DGLabConnected")] = 1.0
+            eng.temps["plain_temp"] = 1.0
+            bridge._push_values()
+
+            addrs = {addr: value for addr, value in sent}
+            self.assertEqual(addrs["/avatar/parameters/DGLabStrengthA"], 42)
+            self.assertEqual(addrs["/avatar/parameters/DGLabBmtrPressure"],
+                             7.912)          # Float 三位
+            self.assertIs(addrs["/avatar/parameters/DGLabConnected"], True)
+            self.assertNotIn("/plain_temp", addrs)   # 非路径变量不回传
+            # 值未变不重发
+            bridge._push_values()
+            self.assertEqual(len(sent), 3)
         finally:
             bridge.close()
 
-    def test_avatar_change_clears_mirrors(self):
-        seen: dict[str, float] = {}
-        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: None, None,
-                           set_temp=lambda k, v: seen.__setitem__(k, v))
+    def test_changed_value_and_custom_expr_resend(self):
+        bridge, sent = self._bridge()
         try:
-            bridge._track_input("/avatar/parameters/DGLabStrengthA", 42)
-            bridge._track_input("/avatar/change", 1)
-            self.assertEqual(seen.get("DGLabStrengthA"), 0)
-            self.assertEqual(bridge._mirrored, set())
+            eng = bridge.engine
+            eng._temp_table = [{"name": _temp_path("DGLabStrengthA"),
+                                "expr": "{COYOTE.StrengthA} * 2"}]
+            eng.temps[_temp_path("DGLabStrengthA")] = 21.0
+            bridge._push_values()
+            eng.temps[_temp_path("DGLabStrengthA")] = 30.0
+            bridge._push_values()
+            # 自定义（非裸引用）表达式原样发送，值变化才重发
+            self.assertEqual(sent, [("/avatar/parameters/DGLabStrengthA", 21.0),
+                                    ("/avatar/parameters/DGLabStrengthA", 30.0)])
         finally:
             bridge.close()
 
 
 class LinkParamsTests(unittest.TestCase):
-    def test_pool_contains_default_names_of_connected_devices(self):
+    def test_pool_contains_paths_of_connected_devices(self):
         mod, ctx = _make_module(_state(("c1", "COYOTE_030"),
                                        ("b1", "BMTR_1")))
         mod.bridge = OscBridge(
@@ -250,10 +260,10 @@ class LinkParamsTests(unittest.TestCase):
             ctx.engine.get_state, None)
         try:
             names = dict(mod.link_params())
-            self.assertIn("DGLabStrengthA", names)      # 输入侧默认名
-            self.assertIn("DGLabEmergency", names)
-            self.assertIn("DGLabBmtrPressure", names)   # 输出侧默认名
-            self.assertIn("DGLabAction", names)
+            self.assertIn(_temp_path("DGLabStrengthA"), names)
+            self.assertIn(_temp_path("DGLabBmtrPressure"), names)
+            self.assertIn(_temp_path("DGLabAction"), names)
+            self.assertIn("DGLabEmergency", names)   # 输入侧默认名仍可用
         finally:
             mod.bridge.close()
 
@@ -276,76 +286,43 @@ class NotifyTests(unittest.TestCase):
 
 
 class EndToEndTests(unittest.IsolatedAsyncioTestCase):
-    """接线 → 宿主装载事件流 → OSC 收包派发/输出回传 全链路。"""
+    """建变量 → 宿主装载临时变量表 → 引擎求值 → 按路径回传 全链路。"""
 
-    async def test_wiring_drives_dispatch_and_push(self):
+    async def test_temp_rows_flow_to_osc(self):
         state = _state(("c1", "COYOTE_030"))
-        calls: list[tuple] = []
-
-        class Commands:
-            async def set_strength(self, ch, v, slot_id=None):
-                calls.append(("set", ch, v, slot_id))
-
-            async def set_wave(self, ch, name, slot_id=None):
-                pass
-
-            async def zap(self, ch, sec, slot_id=None):
-                pass
-
-            async def fire_start(self, slot_id=None, channel=None):
-                pass
-
-            async def fire_stop(self, slot_id=None, channel=None):
-                pass
-
-            async def emergency_stop(self):
-                pass
+        state.slots["c1"].strength = {"A": 42, "B": 0}
 
         mod, ctx = _make_module(state)
         ctx.settings.clear()
         ctx.settings.update(dict(CONFIG, in_port=_free_port()))
 
-        class Host(_Host):
-            async def reload(self, module_id: str):
-                self.reloaded.append(module_id)
-                eng = mod.bridge.engine
-                eng.set_temp_rows(mod.ctx.settings.get("temps"))
-                eng.set_event_cards(mod.ctx.settings.get("events"))
+        class Commands:
+            async def set_strength(self, ch, v, slot_id=None):
+                pass
 
-        ctx.engine.modules = Host()
-
+        host = _Host(mod)
+        ctx.engine.modules = host
+        mod.ctx = ctx
         cfg = OscConfig(dict(ctx.settings), defaults=OSC_CONFIG_DEFAULTS)
         mod.bridge = OscBridge(cfg, ctx.engine.get_state, Commands(),
                                events=ctx.events,
-                               on_devices_changed=mod._on_devices_changed,
-                               set_temp=mod._mirror_temp)
+                               on_devices_changed=mod._on_devices_changed)
         mod.bridge.log = lambda msg: None
+        sent: list[tuple[str, object]] = []
+        mod.bridge.send_value = lambda addr, value: sent.append((addr, value))
         await mod.bridge.start()
         try:
             eng = mod.bridge.engine
-            # 推送循环首拍会触发接线；这里手动触发加速
-            mod.bridge._check_devices(state)
-            self.assertIn("in_strength_a", ctx.settings["auto_wired"])
-            await asyncio.sleep(0.1)   # 宿主 reload 任务装载事件卡片
-            self.assertTrue(eng._cards)
-            eng.tick_event_cards()     # 首拍采基线（未收到包 → 基线 0）
-            # OSC 收包 → 变更卡片直派设备
-            from pythonosc.udp_client import SimpleUDPClient
-
-            sender = SimpleUDPClient("127.0.0.1", cfg["in_port"])
-            sender.send_message("/avatar/parameters/DGLabStrengthA", [42])
-            for _ in range(40):
-                await asyncio.sleep(0.05)
-                if ctx.temps.get("DGLabStrengthA") == 42:
-                    break
-            self.assertEqual(ctx.temps.get("DGLabStrengthA"), 42)
-            eng.tick_event_cards()
-            await asyncio.sleep(0.05)   # 派发经 create_task 调度，让出一拍
-            self.assertIn(("set", "A", 42, "c1"), calls, calls)
-            # 输出卡片周期触发 → 回传值就绪
-            state.slots["c1"].strength = {"A": 42, "B": 0}
-            eng.tick_event_cards()
-            self.assertIn("DGLabStrengthA", eng.out_values)
+            mod.bridge._check_devices(state)   # 推送循环首拍会触发，这里手动加速
+            self.assertIn(_temp_path("DGLabStrengthA"),
+                          [r["name"] for r in ctx.settings["temps"]])
+            await asyncio.sleep(0.1)           # 宿主 reload 装载临时变量表
+            self.assertIn(_temp_path("DGLabStrengthA"), eng.temps)
+            mod.bridge._push_values()
+            addrs = {addr: value for addr, value in sent}
+            self.assertEqual(addrs["/avatar/parameters/DGLabStrengthA"], 42)
+            # 未建立事件流
+            self.assertEqual(ctx.settings.get("events") or [], [])
         finally:
             await mod.bridge.stop()
             mod.bridge.close()
