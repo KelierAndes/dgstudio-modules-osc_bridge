@@ -11,7 +11,8 @@ import unittest
 
 from dglab.socket_v4 import SocketV4Client
 from dglab.state import EngineState, Slot, StateEvents, family_of
-from modules.osc_bridge.bridge import OscBridge, OscConfig, device_osc_names
+from modules.osc_bridge.bridge import (OscBridge, OscConfig, default_output_rows,
+                                       device_osc_names)
 
 
 def _state_with(slots: dict[str, tuple[str, int, int]]) -> EngineState:
@@ -56,8 +57,11 @@ class OscNamingTests(unittest.TestCase):
         state.slots["bmtr-1"].pressure = 7.9
         state.slots["bmtr-1"].edge_state = 2
 
-        # 空映射表 → 按设备前缀自动生成默认输出行，逐设备落地参数名
-        bridge = OscBridge(OscConfig({"rate_hz": 100}), lambda: state, None)
+        # 输出回传为显式配置行驱动（默认行兜底已由事件流接线取代）：
+        # 逐设备落地参数名仍由 default_output_rows 生成
+        cfg = OscConfig({"rate_hz": 100})
+        cfg["outputs"] = default_output_rows(cfg, state)
+        bridge = OscBridge(cfg, lambda: state, None)
         sent: dict[str, object] = {}
         bridge._send_param = lambda name, value: sent.__setitem__(name, value)
         bridge.apply_config()

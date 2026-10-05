@@ -14,7 +14,7 @@ import _bootstrap  # noqa: F401  定位 DGStudio 核心仓库
 from dglab.official_waveforms_ovc import OvcWaveform
 from dglab.state import EngineState, Slot
 from dglab.waves import CONTINUOUS, PULSE_STREAM, SILENT
-from modules.osc_bridge.bridge import OscBridge, OscConfig
+from modules.osc_bridge.bridge import OscBridge, OscConfig, default_input_rows
 
 
 def free_udp_port() -> int:
@@ -55,7 +55,10 @@ class OscFamilyInputTests(unittest.IsolatedAsyncioTestCase):
                 calls.append(("stop",))
 
         port = free_udp_port()
-        bridge = OscBridge(OscConfig({"in_port": port}), lambda: state, Commands())
+        # 直传派发现为显式配置行驱动（默认行兜底已由事件流接线取代）
+        cfg = OscConfig({"in_port": port})
+        cfg["mappings"] = default_input_rows(cfg)
+        bridge = OscBridge(cfg, lambda: state, Commands())
         await bridge.start()
         try:
             from pythonosc.udp_client import SimpleUDPClient
@@ -110,7 +113,9 @@ class OscFamilyInputTests(unittest.IsolatedAsyncioTestCase):
                 pass
 
         port = free_udp_port()
-        bridge = OscBridge(OscConfig({"in_port": port}), lambda: state, Commands())
+        cfg = OscConfig({"in_port": port})
+        cfg["mappings"] = default_input_rows(cfg)   # 显式直传行
+        bridge = OscBridge(cfg, lambda: state, Commands())
         await bridge.start()
         try:
             from pythonosc.udp_client import SimpleUDPClient
@@ -156,7 +161,9 @@ class OscFamilyInputTests(unittest.IsolatedAsyncioTestCase):
                 pass
 
         port = free_udp_port()
-        bridge = OscBridge(OscConfig({"in_port": port}), lambda: state, Commands())
+        cfg = OscConfig({"in_port": port})
+        cfg["mappings"] = default_input_rows(cfg)   # 显式直传行
+        bridge = OscBridge(cfg, lambda: state, Commands())
         await bridge.start()
         try:
             from pythonosc.udp_client import SimpleUDPClient

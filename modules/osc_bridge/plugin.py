@@ -1,16 +1,20 @@
 """VRChat OSC 联动模块：把桥接器以外部模块形式接入宿主。
 
 头像参数是动态定义的：模块收到哪个参数名就以同名参数建立参数表，
-不需要在配置里预声明。联动关系只落在两张映射表上
-（``mappings`` 核心输入参数 ← 表达式，``outputs`` 头像参数名 ← 核心输出参数表达式），
-配置文件除桥接设置外只保存这两张表。META["config"] 声明全部配置项，
-宿主装载 config/osc.json 时自动补齐缺省，联动页据此渲染映射表与模块设置。
+不需要在配置里预声明。META["config"] 声明全部配置项，宿主装载
+config/osc.json 时自动补齐缺省。
 
-设备接入后自动向核心暴露该设备全部可写/可读参数：输入表按设备家族补
-「核心输入参数 ← 头像参数」行（如 郊狼通道A强度 ← DGLabStrengthA），
-输出表按接入设备补「核心输出参数 → 头像参数」行（如 灵猫气压
-BMTR.Pressure → DGLabBmtrPressure）；缺省行以参数 id 记账（auto_exposed），
-用户删除的行不会随设备变化复活，已有行的改名与表达式原样保留。
+设备接入后自动向核心暴露该设备全部可写/可读参数，**以事件流 + 临时变量
+形式接线，不写映射表**：
+
+* 输入值（vrc 侧参数 → 设备可写参数）：收包值镜像进共享临时变量空间
+  （``temp_specs`` 声明为模块维护行），每个核心输入参数建一张
+  「变量变更时」事件卡片直派（首拍采基线，不重刷同值、不强推 0）；
+* 输出值（核心可读参数 → vrc 侧）：一张周期事件卡片把核心输出信号
+  实时值写入临时变量并回传（``out_values`` → OSC 发送按值变化去重）。
+
+接线以参数 id 记账（``auto_wired``）：用户删除过的动作不复活，卡片与
+变量均可联动页编辑。映射表仅兼容旧配置（引擎只装载显式行，无默认兜底）。
 OscModule 负责桥接器的生命周期（每次启动重建桥接器，
 使「修改地址/端口 → 重新开关」立即生效）。
 """
@@ -18,10 +22,10 @@ OscModule 负责桥接器的生命周期（每次启动重建桥接器，
 META = {
     "id": "osc_bridge",
     "name": "VRChat OSC 联动",
-    "version": "1.7.0",
-    "description": "头像参数动态建表，核心参数映射表双向表达式驱动："
-                   "设备数值经表达式写回头像参数，头像参数/游戏信号反向控制设备；"
-                   "设备接入即自动暴露其全部可写/可读参数。",
+    "version": "1.8.0",
+    "description": "头像参数动态建表；设备接入即以事件流与临时变量自动接线"
+                   "（输入按变量变更直派设备，输出按周期回传头像参数），"
+                   "联动页可自由编辑，不再使用映射表。",
     "settings_key": "osc",
     "actions": ["osc"],
     "default_enabled": False,
@@ -75,10 +79,9 @@ META = {
 from plugins import ButtonAction, ModuleBase, spec_defaults
 
 from dglab.params import core_inputs as _core_inputs
+from dglab.params import output_specs as _output_specs
 from modules.osc_bridge.bridge import (OscBridge, OscConfig,
-                                       default_input_name,
-                                       default_input_rows,
-                                       default_output_rows)
+                                       default_input_name, device_osc_names)
 
 # 配置缺省值唯一来源 = META["config"] 声明，OscConfig 仅做兜底
 OSC_CONFIG_DEFAULTS = spec_defaults(META["config"])
@@ -113,17 +116,49 @@ class OscModule(ModuleBase):
             state = None
         if state is not None:
             # 接入设备的默认头像参数名也进入变量池：未收到任何 OSC 包时
-            # 表达式同样可以点选（可读参数随设备连接即暴露给核心）
-            for row in default_input_rows(self.bridge.config, state):
-                name = str(row.get("expr") or "").strip().strip("{}")
-                if name:
-                    pool.setdefault(name, f"头像参数默认名 · {name}")
+            # 事件卡片与表达式同样可以点选
+            settings = self.ctx.settings
+            for spec in _wired_inputs(settings, state):
+                name = default_input_name(settings, spec["key"])
+                pool.setdefault(name, f"头像参数默认名 · {name}")
+            for spec in _wired_outputs(settings, state):
+                pool.setdefault(spec["name"], f"头像参数默认名 · {spec['name']}")
         return sorted(pool.items())
+
+    def temp_specs(self) -> list[dict]:
+        """模块维护的临时变量声明：设备接入后自动暴露的输入/输出值。
+
+        输入值由桥接收包镜像写入（``ctx.set_temp``），输出值由周期事件
+        卡片的输出动作写入——联动页「临时变量」面板显示为模块维护行。
+        """
+        if self.ctx is None:
+            return []
+        try:
+            state = self.ctx.engine.get_state()
+        except Exception:
+            return []
+        if state is None:
+            return []
+        settings = self.ctx.settings
+        specs: dict[str, dict] = {}
+        for spec in _wired_inputs(settings, state):
+            # 输入/输出默认参数名可能同名（如 DGLabStrengthA 双向），
+            # 以输入侧声明为准，避免联动页重复行
+            specs.setdefault(default_input_name(settings, spec["key"]),
+                             {"label": str(spec["label"]),
+                              "desc": "OSC 收包写入（模块维护），事件输入动作可引用"})
+        for spec in _wired_outputs(settings, state):
+            specs.setdefault(spec["name"],
+                             {"label": str(spec["label"]),
+                              "desc": f"事件输出动作写入（{spec['type']}）· 随 OSC 回传"})
+        return [{"key": key, **item} for key, item in specs.items()]
 
     def on_load(self, ctx) -> None:
         self.ctx = ctx
         migrate_legacy(ctx.settings)
         materialize_names(ctx.settings)
+        if "auto_exposed" in ctx.settings:   # v1.7 映射表记账本，已废弃
+            ctx.settings.pop("auto_exposed")
 
     def on_unload(self) -> None:
         if self.bridge is not None:
@@ -139,20 +174,20 @@ class OscModule(ModuleBase):
                 await self.bridge.stop()
             except Exception:
                 pass
-        materialize(self.ctx.settings, self.ctx.engine.get_state())
         cfg = OscConfig(self.ctx.settings, defaults=OSC_CONFIG_DEFAULTS)
         self.bridge = OscBridge(
             cfg,
             self.ctx.engine.get_state,
             self.ctx.engine,
             events=self.ctx.events,
-            on_auto_rows=self._persist_auto_rows,
+            on_devices_changed=self._on_devices_changed,
+            set_temp=self._mirror_temp,
         )
         self.bridge.log = self.ctx.log
         await self.bridge.start()
 
     async def reload_config(self) -> None:
-        """映射表编辑后立即重载（无需重启桥接）。"""
+        """映射表/前缀配置变更后立即重载引擎装载（无需重启桥接）。"""
         if self.bridge is None:
             return
         for key in ("mappings", "outputs", "prefix", "device_prefixes"):
@@ -194,30 +229,79 @@ class OscModule(ModuleBase):
         bridge.send_value(address, value)
         self.ctx.log(f"OSC {address} = {value}")
 
-    def _persist_auto_rows(self, rows_in: list[dict], rows_out: list[dict]) -> None:
-        """设备集变化时落地新设备的参数行（桥接推送循环回调）。
+    def _on_devices_changed(self, state) -> None:
+        """设备集变化 → 以事件流 + 临时变量接线新设备参数（桥接回调）。
 
-        以参数 id 记账（auto_exposed）：出现过的 id 不重复落地，用户删除
-        的行不会被设备变化复活，已有行的改名与表达式原样保留。落盘后
-        同步桥接映射表并通知界面重建，联动页即见新参数。
+        输入：每个核心输入参数一张「变量变更时」卡片（首拍采基线，不重刷
+        同值、不强推 0）；输出：单张周期卡片把核心输出信号写入临时变量并
+        回传。以参数 id 记账（auto_wired）：用户删除过的动作不复活。
         """
         settings = self.ctx.settings
-        if not _expose_device_rows(settings, rows_in, rows_out):
+        wired = {str(x) for x in (settings.get("auto_wired") or [])}
+        cards = [e for e in (settings.get("events") or [])
+                 if isinstance(e, dict)]
+        changed = False
+        for spec in _wired_inputs(settings, state):
+            if spec["key"] in wired:
+                continue
+            name = default_input_name(settings, spec["key"])
+            cards.append({"name": f"OSC {spec['label']}（自动）",
+                          "trigger": "change", "arg": name,
+                          "actions": [{"dir": "in", "param": spec["key"],
+                                       "var": name}]})
+            wired.add(spec["key"])
+            changed = True
+        new_outs = []
+        for spec in _wired_outputs(settings, state):
+            if spec["key"] in wired:
+                continue
+            new_outs.append({"dir": "out", "param": spec["key"],
+                             "var": spec["name"], "name": spec["name"],
+                             "type": spec["type"]})
+            wired.add(spec["key"])
+            changed = True
+        if new_outs:
+            card = next((e for e in cards if e.get("name") == _OUT_CARD), None)
+            if card is None:
+                card = {"name": _OUT_CARD, "trigger": "period", "arg": 50,
+                        "actions": []}
+                cards.append(card)
+            card["actions"] = list(card.get("actions") or []) + new_outs
+        if "auto_exposed" in settings:      # v1.7 映射表记账本，已废弃
+            settings.pop("auto_exposed")
+            changed = True
+        if not changed:
             return
-        if self.bridge is not None:
-            self.bridge.config["mappings"] = _rows(settings.get("mappings"))
-            self.bridge.config["outputs"] = _rows(settings.get("outputs"))
-            self.bridge.apply_config()
-        events = getattr(self.ctx, "events", None)
-        if events is not None:
-            events.emit("modules_changed", self.id)
+        settings["events"] = cards
+        settings["auto_wired"] = sorted(wired)
+        self._reload_logic()
+        bus = getattr(self.ctx, "events", None)
+        if bus is not None:
+            bus.emit("modules_changed", self.id)
+
+    def _reload_logic(self) -> None:
+        """让宿主重载逻辑表：临时变量/事件流装载进引擎并启动事件节拍。"""
+        host = getattr(self.ctx.engine, "modules", None)
+        reload_fn = getattr(host, "reload", None) if host is not None else None
+        if reload_fn is None:
+            return
+        try:
+            self.ctx.submit(reload_fn(self.id))
+        except Exception as exc:
+            self.ctx.log(f"重载事件流/临时变量失败: {exc!r}")
+
+    def _mirror_temp(self, key, value) -> None:
+        """收包值 → 宿主共享临时变量空间（老宿主无 set_temp 时跳过）。"""
+        set_temp = getattr(self.ctx, "set_temp", None)
+        if set_temp is not None:
+            set_temp(str(key), value)
 
 
 def migrate_legacy(settings) -> bool:
     """旧版逐参数名/input_expr/custom_inputs → ``mappings`` 行表。
 
-    只迁移真正的旧配置内容；全新配置不再预填全家族默认行——缺省行由
-    :func:`materialize` 与设备接入回调按接入设备记账落地（auto_exposed）。
+    只迁移真正的旧配置内容；引擎仅装载显式行，默认接线由事件流 +
+    临时变量承担（见 :meth:`OscModule._on_devices_changed`）。
     """
     changed = False
     if not _rows(settings.get("mappings")):
@@ -236,62 +320,41 @@ def migrate_legacy(settings) -> bool:
     return changed
 
 
-def materialize(settings, state) -> bool:
-    """按当前接入设备把缺省参数行落地成可编辑的完整行（双向，启动时调用）。
+# 输出接线共用的事件卡片名（模块维护，设备变化时向其追加输出动作）
+_OUT_CARD = "OSC 状态回传（自动）"
 
-    输入表按接入家族补核心输入参数行（含全局急停），输出表按接入设备补
-    输出参数行（含全局 Action）；``auto_exposed`` 记账保证用户删除的行
-    不被复活。旧版 ``output_map`` 的重命名优先落地。
+
+def _wired_inputs(settings, state) -> list[dict]:
+    """当前接入设备对应的核心输入参数（含全局急停，BMTR 无输入参数）。"""
+    try:
+        names = device_osc_names(state, settings.get("device_prefixes") or {})
+    except Exception:
+        names = {}
+    families = {info["family"] for info in names.values()}
+    return [spec for spec in _core_inputs()
+            if not spec["family"] or spec["family"] in families]
+
+
+def _wired_outputs(settings, state) -> list[dict]:
+    """当前接入设备的核心输出参数（含全局 Action）。
+
+    返回 ``{key: 核心输出参数 id, label, name: 默认头像参数名, type}``。
     """
-    changed = _expose_device_rows(
-        settings,
-        default_input_rows(settings, state),
-        default_output_rows(settings, state))
-    if changed and "output_map" in settings:
-        settings.pop("output_map", None)
-    return changed
-
-
-def _expose_device_rows(settings, rows_in: list[dict],
-                        rows_out: list[dict]) -> bool:
-    """把缺省参数行并入两张映射表并记账（返回是否发生变更）。
-
-    记账本 ``auto_exposed`` 记录暴露过的参数 id：已有行（含用户新建的）
-    一并记入，故删除行不会被下次设备变化重新补回。
-    """
-    exposed = {str(x) for x in (settings.get("auto_exposed") or [])}
-    orig = set(exposed)
-    merged_in, in_changed = _expose_rows(settings.get("mappings"), rows_in,
-                                         exposed)
-    merged_out, out_changed = _expose_rows(settings.get("outputs"), rows_out,
-                                           exposed)
-    if not (in_changed or out_changed or exposed != orig):
-        return False
-    if in_changed:
-        settings["mappings"] = merged_in
-    if out_changed:
-        settings["outputs"] = merged_out
-    settings["auto_exposed"] = sorted(exposed)
-    materialize_names(settings)
-    return True
-
-
-def _expose_rows(existing, defaults, exposed: set) -> tuple[list, bool]:
-    """defaults 中未暴露过的参数行并入 existing（已有行原样保留）。"""
-    rows = _rows(existing)
-    exposed.update(str(row.get("param") or "") for row in rows)
-    have = {str(row.get("param") or "") for row in rows}
-    out = list(rows)
-    changed = False
-    for row in defaults or []:
-        pid = str(row.get("param") or "").strip()
-        if not pid or pid in have or pid in exposed:
-            continue
-        out.append(dict(row))
-        have.add(pid)
-        exposed.add(pid)
-        changed = True
-    return out, changed
+    out: list[dict] = []
+    try:
+        names = device_osc_names(state, settings.get("device_prefixes") or {})
+    except Exception:
+        names = {}
+    for sid in sorted(names):
+        info = names[sid]
+        for spec in _output_specs(info["family"], int(info.get("index", 1))):
+            out.append({"key": spec["key"], "label": spec["label"],
+                        "name": f"{info['name']}{spec['signal']}",
+                        "type": spec["type"]})
+    prefix = str(settings.get("prefix") or "DGLab")
+    out.append({"key": "Action", "label": "App 按键反馈",
+                "name": f"{prefix}Action", "type": "Int"})
+    return out
 
 
 def materialize_names(settings) -> bool:

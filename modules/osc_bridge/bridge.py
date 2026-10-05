@@ -1,16 +1,11 @@
-"""VRChat OSC 桥接：动态参数表 + 核心参数双向映射。
+"""VRChat OSC 桥接：动态参数表 + 事件流/临时变量接线。
 
 头像侧参数是**动态定义**的：任何收到的 ``/avatar/parameters/<名称>`` 都以
-``<名称>`` 建立同名参数进入模块参数表，并作为信号参与运算 —— 模块不需要
-预声明头像参数名。联动关系全部落在两张映射表上（配置文件也只保存它们）：
-
-* ``mappings`` 行 ``{param: 核心输入参数 id, expr: 表达式}``：表达式引用头像
-  参数名（``{DGLabStrengthA}``）、其他模块量与核心输出参数，结果取整钳制后
-  派发到设备动作；表达式留空即同名直传 ``{in_strength_a}``；
-* ``outputs`` 行 ``{param: 核心输出参数 id, name: 头像参数名, expr: 表达式}``：
-  求值后写回 ``/avatar/parameters/<name>``，参数名由用户重命名。
-
-未配置映射表时按「设备前缀 + 信号名」的默认命名自动建表，行为与旧版一致。
+``<名称>`` 建立同名参数进入模块参数表，并镜像进共享临时变量空间 —— 模块
+不需要预声明头像参数名。设备参数的核心接线由模块在设备接入时以**事件流
+卡片**建立（输入 = 变量变更时直派核心输入参数，输出 = 周期把核心输出
+信号写入临时变量与回传表），联动页可自由编辑；映射表（``mappings`` /
+``outputs``）仅保留引擎装载接口兼容旧配置，不再自动生成默认行。
 """
 
 from __future__ import annotations
@@ -67,13 +62,17 @@ class OscConfig(dict):
 
 class OscBridge:
     def __init__(self, config: OscConfig, get_state, commands, events=None,
-                 on_auto_rows=None):
+                 on_devices_changed=None, set_temp=None):
         self.config = config
         self.get_state = get_state
         self.commands = commands
-        # 设备集变化回调：fn(默认输入行, 默认输出行)，模块据此把新设备
-        # 参数落地进配置表（联动页即见），见 plugin._persist_auto_rows
-        self._on_auto_rows = on_auto_rows
+        # 设备集变化回调：fn(state)，模块据此以事件流+临时变量接线新设备
+        # 参数（见 plugin._on_devices_changed）
+        self._on_devices_changed = on_devices_changed
+        # 收包镜像回调：fn(参数名, 数值)，把头像参数值写入宿主共享临时
+        # 变量空间（联动页「模块维护」行可见可引用）
+        self._set_temp = set_temp
+        self._mirrored: set[str] = set()
 
         self._client = SimpleUDPClient(config["out_ip"], int(config["out_port"]))
         self._dispatcher = Dispatcher()
@@ -154,12 +153,35 @@ class OscBridge:
         if str(addr) == "/avatar/change":
             self._last_sent.clear()
             self.engine.reset()
+            self._clear_mirrored_temps()
             return
         if not args:
             return
         name = str(addr).rstrip("/").rsplit("/", 1)[-1]
         self.input_values[name] = {"value": args[0], "ts": time.monotonic()}
         self.engine.signal(name, args[0])
+        self._mirror_temp(name, args[0])
+
+    def _mirror_temp(self, name: str, value) -> None:
+        """头像参数值镜像进共享临时变量空间（面板可见、事件可引用）。"""
+        if self._set_temp is None:
+            return
+        try:
+            self._set_temp(name, value)
+            self._mirrored.add(name)
+        except Exception as exc:
+            self.log(f"[OSC] 临时变量镜像 {name} 失败: {exc!r}")
+
+    def _clear_mirrored_temps(self) -> None:
+        """换头像时清零已镜像的临时变量，避免旧值残留驱动事件。"""
+        if self._set_temp is None or not self._mirrored:
+            return
+        for name in self._mirrored:
+            try:
+                self._set_temp(name, 0)
+            except Exception:
+                pass
+        self._mirrored.clear()
 
     def param_names(self, max_age_s: float = 120.0) -> list[str]:
         """动态参数表内的参数名（联动页表达式变量池）。"""
@@ -313,7 +335,7 @@ class OscBridge:
             while self._running:
                 await asyncio.sleep(interval)
                 state = self._safe_state()
-                self._refresh_rows(state)   # 接入设备变化时补默认输出行
+                self._check_devices(state)  # 接入设备变化时通知模块接线
                 self.engine.pump()
                 self._push_values()
                 tick += 1
@@ -322,24 +344,22 @@ class OscBridge:
         except asyncio.CancelledError:
             pass
 
-    def _refresh_rows(self, state) -> None:
+    def _check_devices(self, state) -> None:
         sig = _device_sig(state, self.config.get("device_prefixes") or {})
         if sig == self._auto_sig:
             return
         self._auto_sig = sig
-        self.apply_config()
-        self._notify_device_rows(state)
+        self._notify_devices_changed(state)
 
-    def _notify_device_rows(self, state) -> None:
-        """设备集变化 → 把当前设备的默认参数行交给模块落地配置。"""
-        callback = self._on_auto_rows
+    def _notify_devices_changed(self, state) -> None:
+        """设备集变化 → 交给模块以事件流/临时变量接线新设备参数。"""
+        callback = self._on_devices_changed
         if callback is None or state is None:
             return
         try:
-            callback(default_input_rows(self.config, state),
-                     default_output_rows(self.config, state))
+            callback(state)
         except Exception as exc:
-            self.log(f"[OSC] 设备参数自动落地失败: {exc!r}")
+            self.log(f"[OSC] 设备参数自动接线失败: {exc!r}")
 
     def _send_keepalive(self) -> None:
         """从接收端口向 VRChat 发注册包, 使其把回传 OSC 发往本机网卡地址.
@@ -465,21 +485,14 @@ def default_output_rows(config: dict, state) -> list[dict]:
 # dglab.naming 提供并经上方 import 再导出（__all__ 兼容旧引用路径）。
 
 
-def effective_rows(config: dict, state) -> tuple[list, list]:
-    """配置 → 引擎实际使用的两张表。
+def effective_rows(config: dict, state=None) -> tuple[list, list]:
+    """配置 → 引擎实际使用的两张表：**仅显式配置行**。
 
-    输入表：有任一行即完全由配置决定；整表为空时按默认参数名自动生成直传行。
-    输出表：配置行优先，接入设备上未被覆盖的信号补默认行（新设备接入即有输出）。
+    旧版在此处按设备自动补默认行（输入直传/输出回传的兜底），该机制已由
+    模块的事件流 + 临时变量自动接线取代（设备接入即建卡片与变量，
+    联动页可编辑），引擎不再隐式建行，避免旧链路在新模型下重复派发。
     """
-    rows_in = _valid(config.get("mappings") or [])
-    if not rows_in:
-        rows_in = default_input_rows(config)
-    rows_out = _valid(config.get("outputs") or [])
-    covered = {str(row.get("param") or "") for row in rows_out}
-    for row in default_output_rows(config, state):
-        if row["param"] not in covered:
-            rows_out.append(row)
-    return rows_in, rows_out
+    return _valid(config.get("mappings") or []), _valid(config.get("outputs") or [])
 
 
 def _valid(rows: list) -> list[dict]:
