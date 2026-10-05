@@ -19,7 +19,7 @@ from __future__ import annotations
 META = {
     "id": "osc_bridge",
     "name": "VRChat OSC 联动",
-    "version": "1.10.0",
+    "version": "1.11.0",
     "description": "头像参数动态建表；设备接入即自动维护完整 OSC 路径命名的"
                    "回传临时变量（重命名即改地址），联动页面板可见，"
                    "不建事件流、不写映射表。",
@@ -126,11 +126,16 @@ class OscModule(ModuleBase):
         return sorted(pool.items())
 
     def temp_specs(self) -> list[dict]:
-        """模块自动维护的临时变量声明：设备可读参数 → 路径命名回传变量。
+        """模块自动注册的临时变量声明：接入设备的**全部核心参数**。
 
-        变量名 = 完整 OSC 回传路径（``avatar/parameters/<默认参数名>``），
-        值由桥接推送循环自动写入（模块维护，无表达式），并按变量名回传
-        OSC；用户重命名即改回传地址（在面板中编辑该行即转为普通变量）。
+        * 输出参数（可读）：``avatar/parameters/<默认输出名>``——桥接自动
+          写入核心输出信号实时值并按变量名回传 OSC（模块维护）；
+        * 输入参数（可写）：``avatar/parameters/<默认输入名>``——收到的
+          同名头像参数值自动镜像（波形选择、开火等，不回传），供事件流
+          绑定派发；
+        * 与输出变量同名的输入参数（如通道强度双向同名）以输出维护为准。
+
+        变量名即 OSC 回传路径，重命名即改地址（编辑后转为普通变量）。
         """
         if self.ctx is None:
             return []
@@ -141,13 +146,17 @@ class OscModule(ModuleBase):
         if state is None:
             return []
         settings = self.ctx.settings
-        specs: list[dict] = []
+        specs: dict[str, dict] = {}
         for spec in _wired_outputs(settings, state):
-            specs.append({"key": _temp_path(spec["name"]),
-                          "label": str(spec["label"]),
-                          "desc": f"模块自动维护（{spec['type']}）· "
-                                  f"按变量名回传 {_TEMP_PATH_PREFIX}…"})
-        return specs
+            specs[_temp_path(spec["name"])] = {
+                "label": str(spec["label"]),
+                "desc": f"模块自动维护（{spec['type']}）· 按变量名回传"}
+        for spec in _wired_inputs(settings, state):
+            name = default_input_name(settings, spec["key"])
+            specs.setdefault(_temp_path(name), {
+                "label": str(spec["label"]),
+                "desc": "收包值自动镜像（模块维护）· 事件流绑定派发用"})
+        return [{"key": key, **item} for key, item in specs.items()]
 
     def on_load(self, ctx) -> None:
         self.ctx = ctx

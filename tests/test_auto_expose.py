@@ -138,16 +138,25 @@ class EffectiveRowsTests(unittest.TestCase):
 
 
 class MaintainedSpecTests(unittest.TestCase):
-    def test_specs_follow_connected_devices(self):
+    def test_specs_cover_all_core_params_of_devices(self):
         mod, ctx = _make_module(_state(("c1", "COYOTE_030"),
                                        ("b1", "BMTR_1")))
         specs = {spec["key"]: spec for spec in mod.temp_specs()}
+        # 输出侧（模块维护 + 回传）
         self.assertIn(_path("DGLabStrengthA"), specs)     # 郊狼强度
         self.assertIn(_path("DGLabBmtrPressure"), specs)  # 灵猫气压
         self.assertIn(_path("DGLabAction"), specs)        # 全局
+        # 输入侧（收包镜像：波形选择/步进/开火等）
+        self.assertIn(_path("DGLabWaveA"), specs)
+        self.assertIn(_path("DGLabWaveStepB"), specs)
+        self.assertIn(_path("DGLabFire"), specs)
+        self.assertIn(_path("DGLabEmergency"), specs)     # 全局急停
         self.assertFalse(any("负鼠" in str(spec["label"])
                              for spec in specs.values()))
+        # 同名冲突：输出维护优先（通道强度双向同名）
         self.assertIn("模块自动维护", specs[_path("DGLabStrengthA")]["desc"])
+        # 输入侧声明注明镜像语义
+        self.assertIn("镜像", specs[_path("DGLabWaveA")]["desc"])
 
     def test_no_state_no_specs(self):
         mod, ctx = _make_module(None)
@@ -171,6 +180,67 @@ class MaintainedSpecTests(unittest.TestCase):
         mod._on_devices_changed(ctx.engine.get_state())
         self.assertNotIn("auto_wired", ctx.settings)
         self.assertNotIn("auto_exposed", ctx.settings)
+
+
+class MirrorTests(unittest.TestCase):
+    def test_received_input_params_mirror_to_path_temps(self):
+        state = _state(("c1", "COYOTE_030"))
+        written: dict[str, float] = {}
+        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: state, None,
+                           set_temp=lambda k, v: written.__setitem__(k, v))
+        try:
+            bridge._refresh_input_names(state)   # 设备接入刷新缓存
+            self.assertIn("DGLabWaveA", bridge._input_names)
+            bridge._track_input("/avatar/parameters/DGLabWaveA", 3)
+            self.assertEqual(written.get(_path("DGLabWaveA")), 3)
+            self.assertIn(_path("DGLabWaveA"), bridge._no_send)
+        finally:
+            bridge.close()
+
+    def test_unknown_params_not_mirrored(self):
+        state = _state(("c1", "COYOTE_030"))
+        written: dict[str, float] = {}
+        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: state, None,
+                           set_temp=lambda k, v: written.__setitem__(k, v))
+        try:
+            bridge._refresh_input_names(state)
+            bridge._track_input("/avatar/parameters/blood", 120)
+            self.assertEqual(written, {})
+        finally:
+            bridge.close()
+
+    def test_mirror_never_sent_back(self):
+        state = _state(("c1", "COYOTE_030"))
+        written: dict[str, float] = {}
+        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: state, None,
+                           set_temp=lambda k, v: written.__setitem__(k, v))
+        try:
+            sent: list[tuple[str, object]] = []
+            bridge.send_value = lambda a, v: sent.append((a, v))
+            bridge._refresh_input_names(state)
+            bridge._track_input("/avatar/parameters/DGLabWaveA", 3)
+            # 镜像值进入共享空间（engine.temps 分支），但不回传该键
+            bridge.engine.temps[_path("DGLabWaveA")] = 3.0
+            bridge._push_values()
+            self.assertNotIn(_addr("DGLabWaveA"), [a for a, _v in sent])
+        finally:
+            bridge.close()
+
+    def test_output_maintenance_wins_over_same_name_input(self):
+        # 通道强度输入/输出默认名相同：输出维护注册后镜像跳过
+        state = _state(("c1", "COYOTE_030"))
+        state.slots["c1"].strength = {"A": 55, "B": 0}
+        written: dict[str, float] = {}
+        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: state, None,
+                           set_temp=lambda k, v: written.__setitem__(k, v))
+        try:
+            bridge._refresh_input_names(state)
+            bridge._push_maintained(state)      # 输出维护先写
+            self.assertIn(_path("DGLabStrengthA"), bridge._maintained_keys)
+            bridge._track_input("/avatar/parameters/DGLabStrengthA", 42)
+            self.assertEqual(written.get(_path("DGLabStrengthA")), 55)
+        finally:
+            bridge.close()
 
 
 class MaintainedPushTests(unittest.TestCase):

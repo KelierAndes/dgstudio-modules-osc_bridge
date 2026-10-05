@@ -95,7 +95,6 @@ class OscBridge:
         # 共享临时变量写入回调：fn(变量名, 数值)，模块维护的回传参数写入
         # 宿主共享空间（新版核心面板可见；发行版无此能力时跳过）
         self._set_temp = set_temp
-        self._on_devices_changed = on_devices_changed
 
         self._client = SimpleUDPClient(config["out_ip"], int(config["out_port"]))
         self._dispatcher = Dispatcher()
@@ -108,6 +107,10 @@ class OscBridge:
         self._action_value = 0
         self._action_until = 0.0
         self._last_sent: dict[str, Any] = {}
+        # 模块维护变量（输出回传）/ 镜像变量（输入收包，不回传）/ 输入默认名缓存
+        self._maintained_keys: set[str] = set()
+        self._no_send: set[str] = set()
+        self._input_names: set[str] = set()
         self.input_values: dict[str, dict] = {}
         self.last_rx: float | None = None
         self.rx_count = 0
@@ -209,6 +212,28 @@ class OscBridge:
         name = str(addr).rstrip("/").rsplit("/", 1)[-1]
         self.input_values[name] = {"value": args[0], "ts": time.monotonic()}
         self.engine.signal(name, args[0])
+        self._mirror_input(name, args[0])
+
+    def _mirror_input(self, name: str, value) -> None:
+        """核心输入参数的同名收包值 → 路径命名临时变量（镜像，不回传）。
+
+        自动注册的输入侧变量（波形选择、开火等）由收包值驱动，供联动页
+        面板显示与事件流绑定；与输出维护变量同名的跳过（避免回环互踩），
+        且一律不进入回传通道。
+        """
+        if name not in self._input_names:
+            return
+        writer = self._set_temp
+        if writer is None:
+            return
+        key = f"{TEMP_PATH_PREFIX}{name}"
+        if key in self._maintained_keys:
+            return
+        try:
+            writer(key, value)
+            self._no_send.add(key)
+        except Exception as exc:
+            self.log(f"[OSC] 临时变量镜像 {name} 失败: {exc!r}")
 
     def param_names(self, max_age_s: float = 120.0) -> list[str]:
         """动态参数表内的参数名（联动页表达式变量池）。"""
@@ -380,7 +405,8 @@ class OscBridge:
         self._notify_devices_changed(state)
 
     def _notify_devices_changed(self, state) -> None:
-        """设备集变化 → 交给模块以事件流/临时变量接线新设备参数。"""
+        """设备集变化 → 刷新输入默认名缓存并交给模块刷新维护声明。"""
+        self._refresh_input_names(state)
         callback = self._on_devices_changed
         if callback is None or state is None:
             return
@@ -388,6 +414,26 @@ class OscBridge:
             callback(state)
         except Exception as exc:
             self.log(f"[OSC] 设备参数自动接线失败: {exc!r}")
+
+    def _refresh_input_names(self, state) -> None:
+        """当前接入设备家族的核心输入参数默认头像参数名集合（镜像判定用）。
+
+        输入参数名与旧版一致不区分设备序号（同家族共用）；全局急停始终
+        纳入。
+        """
+        if state is None:
+            return
+        try:
+            names = device_osc_names(state,
+                                     self.config.get("device_prefixes") or {})
+        except Exception:
+            return
+        families = {info["family"] for info in names.values()}
+        input_names = {default_input_name(self.config, spec["key"])
+                       for spec in core_inputs()
+                       if not spec["family"] or spec["family"] in families}
+        input_names.add(f"{self.config.get('prefix') or 'DGLab'}Emergency")
+        self._input_names = input_names
 
     def _send_keepalive(self) -> None:
         """从接收端口向 VRChat 发注册包, 使其把回传 OSC 发往本机网卡地址.
@@ -437,6 +483,8 @@ class OscBridge:
 
     def _maintain_temp(self, avatar_name: str, kind: str, raw) -> None:
         name = f"{TEMP_PATH_PREFIX}{str(avatar_name or '').lstrip('/')}"
+        self._maintained_keys.add(name)
+        self._no_send.discard(name)   # 输出维护优先：同名镜像变量不再写入
         value = _typed_value(kind, raw)
         writer = self._set_temp
         if writer is not None:
@@ -465,6 +513,8 @@ class OscBridge:
         """
         for row in self._temp_rows:
             name = row["name"]
+            if name in self._no_send:
+                continue        # 镜像变量不回传（避免与收包形成回环）
             try:
                 raw = expr.evaluate(row["expr"], self.engine.values())
             except expr.ExprError:
@@ -477,7 +527,8 @@ class OscBridge:
                 self._last_sent[name] = value
         for key, value in list(self.engine.temps.items()):
             key = str(key)
-            if "/" not in key or any(r["name"] == key for r in self._temp_rows):
+            if "/" not in key or key in self._no_send \
+                    or any(r["name"] == key for r in self._temp_rows):
                 continue
             if self._last_sent.get(key) != value:
                 self.send_value(f"/{key.lstrip('/')}", value)
