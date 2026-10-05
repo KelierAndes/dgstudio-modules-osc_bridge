@@ -8,17 +8,21 @@ config/osc.json 时自动补齐缺省。
 不写映射表）：变量名 = 完整 OSC 回传路径（如
 ``avatar/parameters/DGLabBmtrPressure``），表达式取核心输出信号；
 推送循环把所有路径型临时变量按变量名回传到对应地址，**重命名变量即
-改回传地址**。临时变量以参数 id 记账（auto_wired）：用户删除/改名过
-的变量不重复建立。输入侧头像参数值经信号空间直接可用（联动页实时
-数据与变量池），派发由用户在事件流自行接线。映射表仅兼容旧配置
-（引擎只装载显式行）。OscModule 负责桥接器的生命周期（每次启动重建
-桥接器，使「修改地址/端口 → 重新开关」立即生效）。
+改回传地址**。变量只落在配置的 ``temps`` 字段（是否建立以现有行为
+准，不维护额外记账字段）。输入侧头像参数值经信号空间直接可用
+（联动页实时数据与变量池），派发由用户在事件流自行接线。映射表仅
+兼容旧配置（引擎只装载显式行）。OscModule 负责桥接器的生命周期
+（每次启动重建桥接器，使「修改地址/端口 → 重新开关」立即生效）。
 """
+
+from __future__ import annotations
+
+import re
 
 META = {
     "id": "osc_bridge",
     "name": "VRChat OSC 联动",
-    "version": "1.9.1",
+    "version": "1.9.2",
     "description": "头像参数动态建表；设备接入即把可读参数建为完整 OSC "
                    "路径命名的临时变量并按变量名自动回传（重命名即改地址），"
                    "不建事件流、不写映射表。",
@@ -128,8 +132,11 @@ class OscModule(ModuleBase):
         migrate_legacy(ctx.settings)
         materialize_names(ctx.settings)
         _strip_auto_cards(ctx.settings)      # v1.8 事件卡片接线，已废弃
-        if "auto_exposed" in ctx.settings:   # v1.7 映射表记账本，已废弃
-            ctx.settings.pop("auto_exposed")
+        # 历史记账字段（v1.7 auto_exposed / v1.8-1.9 auto_wired）：废弃即清，
+        # 变量建立只看 temps 现状，不依赖任何持久账本
+        for stale in ("auto_exposed", "auto_wired"):
+            if stale in ctx.settings:
+                ctx.settings.pop(stale)
 
     def on_unload(self) -> None:
         if self.bridge is not None:
@@ -205,28 +212,30 @@ class OscModule(ModuleBase):
 
         只建临时变量，不建事件流、不写映射表：变量名 = 完整 OSC 回传路径
         （``avatar/parameters/<默认参数名>``），表达式取核心输出信号，
-        桥接推送循环按变量名回传。以参数 id 记账（auto_wired）：用户删除
-        或改名过的变量不重复建立。
+        桥接推送循环按变量名自算回传。判断依据是 temps 里是否已有引用
+        该参数的行（表达式 ``{参数id}``，改名/改表达式均算已建立），
+        不维护额外记账字段。
         """
         settings = self.ctx.settings
-        wired = {str(x) for x in (settings.get("auto_wired") or [])}
         rows = [r for r in (settings.get("temps") or [])
                 if isinstance(r, dict)]
-        used = {str(r.get("name") or "").strip() for r in rows}
+        if "auto_wired" in settings:      # v1.8/v1.9 记账本，已废弃：清除
+            settings.pop("auto_wired")
+        referenced = set()
+        for row in rows:
+            for m in _BARE_REF.finditer(str(row.get("expr") or "")):
+                referenced.add(m.group(1))
         changed = False
         for spec in _wired_outputs(settings, state):
-            if spec["key"] in wired:
+            if spec["key"] in referenced:
                 continue
-            path = _temp_path(spec["name"])
-            if path not in used:
-                rows.append({"name": path,
-                             "expr": "{" + spec["key"] + "}"})
-                changed = True
-            wired.add(spec["key"])
+            rows.append({"name": _temp_path(spec["name"]),
+                         "expr": "{" + spec["key"] + "}"})
+            referenced.add(spec["key"])
+            changed = True
         if not changed:
             return
         settings["temps"] = rows
-        settings["auto_wired"] = sorted(wired)
         self._sync_temps()
         self._reload_logic()
         bus = getattr(self.ctx, "events", None)
@@ -282,6 +291,10 @@ def migrate_legacy(settings) -> bool:
 
 # 回传临时变量的命名前缀：变量名 = OSC 地址（去开头 /），桥接按名回传
 _TEMP_PATH_PREFIX = "avatar/parameters/"
+
+# 表达式中的参数引用（判定 temps 行是否已暴露某核心参数，
+# 如 "{BMTR.Pressure}"、"{COYOTE.Battery}*2" 均引用 COYOTE.Battery 时算建立）
+_BARE_REF = re.compile(r"\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\}")
 
 
 def _temp_path(avatar_name: str) -> str:

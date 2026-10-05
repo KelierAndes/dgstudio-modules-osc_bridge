@@ -143,41 +143,58 @@ class TempRowTests(unittest.TestCase):
                          "{COYOTE.StrengthA}")
         self.assertIn(_temp_path("DGLabAction"), rows)
         self.assertIn(_temp_path("DGLabConnected"), rows)
-        # 不建事件流、不写映射表
+        # 不建事件流、不写映射表、不写记账字段
         self.assertNotIn("events", ctx.settings)
         self.assertNotIn("mappings", ctx.settings)
         self.assertNotIn("outputs", ctx.settings)
-        # 记账 + 通知宿主重载与界面刷新
-        self.assertIn("BMTR.Pressure", ctx.settings["auto_wired"])
-        self.assertIn("Action", ctx.settings["auto_wired"])
+        self.assertNotIn("auto_wired", ctx.settings)
+        # 通知宿主重载与界面刷新
         self.assertEqual(ctx.engine.modules.reloaded, ["osc_bridge"])
         self.assertEqual(ctx.events.emitted, [("modules_changed", "osc_bridge")])
 
-    def test_second_call_is_noop(self):
+    def test_stale_ledger_pollution_does_not_block(self):
+        # v1.8 遗留 auto_wired 账本记满全部参数 id：不得拦截变量建立，
+        # 装载时账本清除，设备接入照常补建 temps
+        mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
+        ctx.settings["auto_wired"] = ["COYOTE.StrengthA", "Action",
+                                      "in_strength_a", "in_emergency"]
+        mod._on_devices_changed(ctx.engine.get_state())
+        self.assertNotIn("auto_wired", ctx.settings)
+        names = {row["name"] for row in ctx.settings["temps"]}
+        self.assertIn(_temp_path("DGLabStrengthA"), names)
+        self.assertIn(_temp_path("DGLabAction"), names)
+
+    def test_existing_rows_not_duplicated(self):
+        mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
+        mod._on_devices_changed(ctx.engine.get_state())
+        snapshot = [dict(r) for r in ctx.settings["temps"]]
+        mod._on_devices_changed(ctx.engine.get_state())
+        self.assertEqual(ctx.settings["temps"], snapshot)
+
+    def test_user_renamed_or_custom_expr_counts_as_established(self):
+        mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
+        # 用户改名 + 自定义表达式：引用同一参数即视为已建立，不重建
+        ctx.settings["temps"] = [
+            {"name": _temp_path("MyStrength"), "expr": "{COYOTE.StrengthA}"},
+            {"name": _temp_path("DGLabBattery"), "expr": "{COYOTE.Battery}*2"}]
+        mod._on_devices_changed(ctx.engine.get_state())
+        rows = {row["name"]: row for row in ctx.settings["temps"]}
+        self.assertEqual(rows[_temp_path("MyStrength")]["expr"],
+                         "{COYOTE.StrengthA}")
+        self.assertEqual(rows[_temp_path("DGLabBattery")]["expr"],
+                         "{COYOTE.Battery}*2")
+        self.assertNotIn(_temp_path("DGLabStrengthA"), rows)
+        # 未建立的参数照常补齐
+        self.assertIn(_temp_path("DGLabLimitA"), rows)
+
+    def test_new_device_params_appended_on_later_connect(self):
         mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
         mod._on_devices_changed(ctx.engine.get_state())
         count = len(ctx.settings["temps"])
-        mod._on_devices_changed(ctx.engine.get_state())
-        self.assertEqual(len(ctx.settings["temps"]), count)
-        self.assertEqual(ctx.engine.modules.reloaded, ["osc_bridge"])
-
-    def test_user_renames_and_deletes_survive(self):
-        mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
-        mod._on_devices_changed(ctx.engine.get_state())
-        # 用户改名（自定义回传地址）与删除各一行
-        rows = ctx.settings["temps"]
-        for row in rows:
-            if row["name"] == _temp_path("DGLabStrengthA"):
-                row["name"] = _temp_path("MyStrength")
-        ctx.settings["temps"] = [row for row in rows
-                                 if row["name"] != _temp_path("DGLabBattery")]
         mod._on_devices_changed(_state(("c1", "COYOTE_030"),
                                        ("b1", "BMTR_1")))
         names = {row["name"] for row in ctx.settings["temps"]}
-        self.assertIn(_temp_path("MyStrength"), names)      # 改名保留
-        self.assertNotIn(_temp_path("DGLabStrengthA"), names)  # 不重建默认名
-        self.assertNotIn(_temp_path("DGLabBattery"), names)  # 删除不复活
-        # 新设备（灵猫）变量照常补齐
+        self.assertGreater(len(ctx.settings["temps"]), count)
         self.assertIn(_temp_path("DGLabBmtrPressure"), names)
 
 
