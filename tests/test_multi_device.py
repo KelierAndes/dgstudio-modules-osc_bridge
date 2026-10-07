@@ -57,8 +57,6 @@ class OscNamingTests(unittest.TestCase):
         state.slots["bmtr-1"].pressure = 7.9
         state.slots["bmtr-1"].edge_state = 2
 
-        # 输出回传为显式配置行驱动（默认行兜底已由事件流接线取代）：
-        # 逐设备落地参数名仍由 default_output_rows 生成
         cfg = OscConfig({"rate_hz": 100})
         cfg["outputs"] = default_output_rows(cfg, state)
         bridge = OscBridge(cfg, lambda: state, None)

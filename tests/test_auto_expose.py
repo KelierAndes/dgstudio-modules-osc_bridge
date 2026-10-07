@@ -1,10 +1,3 @@
-"""设备接入自动维护回传变量（模块维护临时变量）回归测试。
-
-口径：设备连接后模块经 ``temp_specs`` 把设备可读参数声明为**模块
-维护**的路径命名临时变量（不落配置行、不建事件流、不写映射表）；
-桥接推送循环自动写入实时值并按变量名回传 OSC。用户在面板自建的
-带表达式路径变量由桥接自算回传。
-"""
 from __future__ import annotations
 
 import asyncio
@@ -142,20 +135,16 @@ class MaintainedSpecTests(unittest.TestCase):
         mod, ctx = _make_module(_state(("c1", "COYOTE_030"),
                                        ("b1", "BMTR_1")))
         specs = {spec["key"]: spec for spec in mod.temp_specs()}
-        # 输出侧（模块维护 + 回传）
-        self.assertIn(_path("DGLabStrengthA"), specs)     # 郊狼强度
-        self.assertIn(_path("DGLabBmtrPressure"), specs)  # 灵猫气压
-        self.assertIn(_path("DGLabAction"), specs)        # 全局
-        # 输入侧（收包镜像：波形选择/步进/开火等）
+        self.assertIn(_path("DGLabStrengthA"), specs)
+        self.assertIn(_path("DGLabBmtrPressure"), specs)
+        self.assertIn(_path("DGLabAction"), specs)
         self.assertIn(_path("DGLabWaveA"), specs)
         self.assertIn(_path("DGLabWaveStepB"), specs)
         self.assertIn(_path("DGLabFire"), specs)
-        self.assertIn(_path("DGLabEmergency"), specs)     # 全局急停
+        self.assertIn(_path("DGLabEmergency"), specs)
         self.assertFalse(any("负鼠" in str(spec["label"])
                              for spec in specs.values()))
-        # 同名冲突：输出维护优先（通道强度双向同名）
         self.assertIn("模块自动维护", specs[_path("DGLabStrengthA")]["desc"])
-        # 输入侧声明注明镜像语义
         self.assertIn("镜像", specs[_path("DGLabWaveA")]["desc"])
 
     def test_no_state_no_specs(self):
@@ -163,7 +152,6 @@ class MaintainedSpecTests(unittest.TestCase):
         self.assertEqual(mod.temp_specs(), [])
 
     def test_no_config_rows_written_no_ledger(self):
-        # 自动维护不落配置行、不写记账字段
         mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
         mod._on_devices_changed(ctx.engine.get_state())
         self.assertNotIn("temps", ctx.settings)
@@ -189,7 +177,7 @@ class MirrorTests(unittest.TestCase):
         bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: state, None,
                            set_temp=lambda k, v: written.__setitem__(k, v))
         try:
-            bridge._refresh_input_names(state)   # 设备接入刷新缓存
+            bridge._refresh_input_names(state)
             self.assertIn("DGLabWaveA", bridge._input_names)
             bridge._track_input("/avatar/parameters/DGLabWaveA", 3)
             self.assertEqual(written.get(_path("DGLabWaveA")), 3)
@@ -219,7 +207,6 @@ class MirrorTests(unittest.TestCase):
             bridge.send_value = lambda a, v: sent.append((a, v))
             bridge._refresh_input_names(state)
             bridge._track_input("/avatar/parameters/DGLabWaveA", 3)
-            # 镜像值进入共享空间（engine.temps 分支），但不回传该键
             bridge.engine.temps[_path("DGLabWaveA")] = 3.0
             bridge._push_values()
             self.assertNotIn(_addr("DGLabWaveA"), [a for a, _v in sent])
@@ -227,7 +214,6 @@ class MirrorTests(unittest.TestCase):
             bridge.close()
 
     def test_output_maintenance_wins_over_same_name_input(self):
-        # 通道强度输入/输出默认名相同：输出维护注册后镜像跳过
         state = _state(("c1", "COYOTE_030"))
         state.slots["c1"].strength = {"A": 55, "B": 0}
         written: dict[str, float] = {}
@@ -235,7 +221,7 @@ class MirrorTests(unittest.TestCase):
                            set_temp=lambda k, v: written.__setitem__(k, v))
         try:
             bridge._refresh_input_names(state)
-            bridge._push_maintained(state)      # 输出维护先写
+            bridge._push_maintained(state)
             self.assertIn(_path("DGLabStrengthA"), bridge._maintained_keys)
             bridge._track_input("/avatar/parameters/DGLabStrengthA", 42)
             self.assertEqual(written.get(_path("DGLabStrengthA")), 55)
@@ -262,12 +248,10 @@ class MaintainedPushTests(unittest.TestCase):
             addrs = {addr: value for addr, value in sent}
             self.assertEqual(addrs[_addr("DGLabStrengthA")], 55)
             self.assertEqual(addrs[_addr("DGLabBmtrPressure")], 7.912)
-            self.assertIs(addrs[_addr("DGLabConnected")], True)   # Bool 归真
+            self.assertIs(addrs[_addr("DGLabConnected")], True)
             self.assertIn(_addr("DGLabAction"), addrs)
             self.assertEqual(addrs[_addr("DGLabAction")], 0)
-            # 同步写入共享临时变量空间（面板可见）
             self.assertEqual(written.get(_path("DGLabStrengthA")), 55)
-            # 值未变不重发
             count = len(sent)
             bridge._push_maintained(state)
             self.assertEqual(len(sent), count)
@@ -298,7 +282,6 @@ class MaintainedPushTests(unittest.TestCase):
 
 
 class UserTempRowTests(unittest.TestCase):
-    """用户自建的带表达式路径变量：桥接自算回传。"""
 
     def test_path_temps_evaluated_and_sent(self):
         bridge = OscBridge(OscConfig(dict(CONFIG, temps=[
@@ -351,7 +334,6 @@ class NotifyTests(unittest.TestCase):
 
 
 class EndToEndTests(unittest.IsolatedAsyncioTestCase):
-    """建维护声明 → 桥接写共享空间 + 按路径回传 全链路（旧核心路径）。"""
 
     async def test_maintained_flow_to_osc(self):
         state = _state(("c1", "COYOTE_030"))
@@ -365,7 +347,7 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
             async def set_strength(self, ch, v, slot_id=None):
                 pass
 
-        class LegacyHost:      # 旧核心宿主：无 reload/临时变量装载能力
+        class LegacyHost:
             pass
 
         ctx.engine.modules = LegacyHost()
@@ -380,16 +362,14 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
         mod.bridge.send_value = lambda addr, value: sent.append((addr, value))
         await mod.bridge.start()
         try:
-            mod.bridge._check_devices(state)   # 推送循环首拍会触发
+            mod.bridge._check_devices(state)
             await asyncio.sleep(0.1)
-            # 维护声明就绪（temp_specs 按设备动态）
             self.assertIn(_path("DGLabStrengthA"),
                           [s["key"] for s in mod.temp_specs()])
             mod.bridge._push_maintained(state)
             addrs = {addr: value for addr, value in sent}
             self.assertEqual(addrs[_addr("DGLabStrengthA")], 42)
             self.assertEqual(ctx.temps.get(_path("DGLabStrengthA")), 42)
-            # 未建立事件流、未写配置 temps 行
             self.assertEqual(ctx.settings.get("events") or [], [])
             self.assertNotIn("temps", ctx.settings)
         finally:

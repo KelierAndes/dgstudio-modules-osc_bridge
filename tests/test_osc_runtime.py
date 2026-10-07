@@ -1,5 +1,3 @@
-"""OSC 桥接运行时测试：按家族路由输入、波形步进、开火触发与收包探针。
-（自 DGStudio 主仓库 tests/test_ble_multi.py 迁入，模块外置后随模块仓库维护。）"""
 from __future__ import annotations
 
 import asyncio
@@ -55,7 +53,6 @@ class OscFamilyInputTests(unittest.IsolatedAsyncioTestCase):
                 calls.append(("stop",))
 
         port = free_udp_port()
-        # 直传派发现为显式配置行驱动（默认行兜底已由事件流接线取代）
         cfg = OscConfig({"in_port": port})
         cfg["mappings"] = default_input_rows(cfg)
         bridge = OscBridge(cfg, lambda: state, Commands())
@@ -114,7 +111,7 @@ class OscFamilyInputTests(unittest.IsolatedAsyncioTestCase):
 
         port = free_udp_port()
         cfg = OscConfig({"in_port": port})
-        cfg["mappings"] = default_input_rows(cfg)   # 显式直传行
+        cfg["mappings"] = default_input_rows(cfg)
         bridge = OscBridge(cfg, lambda: state, Commands())
         await bridge.start()
         try:
@@ -162,7 +159,7 @@ class OscFamilyInputTests(unittest.IsolatedAsyncioTestCase):
 
         port = free_udp_port()
         cfg = OscConfig({"in_port": port})
-        cfg["mappings"] = default_input_rows(cfg)   # 显式直传行
+        cfg["mappings"] = default_input_rows(cfg)
         bridge = OscBridge(cfg, lambda: state, Commands())
         await bridge.start()
         try:
@@ -212,10 +209,8 @@ class OscProbeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OscMappingRuntimeTests(unittest.TestCase):
-    """动态参数建表与表达式混合运算（自 DGStudio 主仓库迁入）。"""
 
     def test_dynamic_input_param_drives_core_dispatch(self):
-        # OSC 头像参数动态建表：收到同名参数即进入信号空间参与运算
         from modules.osc_bridge.bridge import OscBridge, OscConfig
         from modules.osc_bridge.plugin import OSC_CONFIG_DEFAULTS
 
@@ -231,7 +226,6 @@ class OscMappingRuntimeTests(unittest.TestCase):
             bridge.close()
 
     def test_output_rows_rename_wins(self):
-        # 输出表默认行：旧 output_map 的重命名优先，其余用前缀 + 信号名
         from dglab.state import EngineState, Slot
         from modules.osc_bridge.bridge import default_output_rows
 
@@ -249,7 +243,6 @@ class OscMappingRuntimeTests(unittest.TestCase):
         self.assertEqual(by["Action"]["name"], "Btn")
 
     def test_expression_mixes_device_vars(self):
-        # 用户口径示例：in_strength_a <- {Strength-max}*({HP}+{Hurt}/{HPmax})
         from dglab.state import EngineState, Slot
         from modules.osc_bridge.bridge import OscBridge, OscConfig
         from modules.osc_bridge.plugin import OSC_CONFIG_DEFAULTS
@@ -267,7 +260,6 @@ class OscMappingRuntimeTests(unittest.TestCase):
             bridge.engine.signal("HP", 60)
             bridge.engine.signal("Hurt", 30)
             bridge.engine.signal("HPmax", 100)
-            # (300-200)*(60+0.3)=6030 → 钳到 200
             self.assertEqual(bridge.engine.last_values["in_strength_a"], 200)
         finally:
             bridge.close()

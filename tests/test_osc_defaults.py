@@ -1,4 +1,3 @@
-"""OSC 默认参数名生成与输入行 name 补齐回归测试。"""
 from __future__ import annotations
 
 import os

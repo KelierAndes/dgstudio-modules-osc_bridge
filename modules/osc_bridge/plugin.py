@@ -1,18 +1,3 @@
-"""VRChat OSC 联动模块：把桥接器以外部模块形式接入宿主。
-
-头像参数是动态定义的：模块收到哪个参数名就以同名参数建立参数表，
-不需要在配置里预声明。META["config"] 声明全部配置项，宿主装载
-config/osc.json 时自动补齐缺省。
-
-设备接入后自动把设备**可读参数**维护为**路径命名的临时变量**（不建
-事件流、不写映射表、不落配置行）：变量名 = 完整 OSC 回传路径（如
-``avatar/parameters/DGLabBmtrPressure``），经 ``temp_specs`` 声明为
-模块维护行（联动页面板可见），桥接推送循环自动写入实时值并按变量名
-回传 OSC，**重命名变量即改回传地址**。用户可在面板自建带表达式的
-普通路径变量（桥接同样按名自算回传）。输入侧头像参数值经信号空间
-直接可用（联动页实时数据与变量池），派发由用户在事件流自行接线。
-映射表仅兼容旧配置（引擎只装载显式行）。
-"""
 
 from __future__ import annotations
 
@@ -28,7 +13,6 @@ META = {
     "default_enabled": False,
     "dynamic_params": True,
     "config": {
-        # ---- 桥接通道设置（全局） ----
         "out_ip": {
             "label": "VRChat 地址", "type": "str", "default": "127.0.0.1",
             "group": "bridge", "desc": "OSC 输出目标 IP（127.0.0.1 自动换为网卡地址）",
@@ -56,7 +40,6 @@ META = {
             "group": "settings",
             "desc": "默认映射行的参数名前缀（仅在映射表为空时用于自动生成）",
         },
-        # ---- 两张映射表（配置文件只写这些） ----
         "mappings": {
             "label": "输入映射表", "type": "list", "default": [],
             "group": "map", "rows": "in",
@@ -81,7 +64,6 @@ from modules.osc_bridge.bridge import (OscBridge, OscConfig,
                                        TEMP_PATH_PREFIX as _TEMP_PATH_PREFIX,
                                        default_input_name, device_osc_names)
 
-# 配置缺省值唯一来源 = META["config"] 声明，OscConfig 仅做兜底
 OSC_CONFIG_DEFAULTS = spec_defaults(META["config"])
 
 
@@ -100,7 +82,6 @@ class OscModule(ModuleBase):
         return META["config"]
 
     def link_params(self) -> list[tuple[str, str]]:
-        """动态参数表：近期收到的头像参数 + 已接入设备的默认参数名与路径。"""
         if self.bridge is None:
             return []
         pool: dict[str, str] = {}
@@ -113,8 +94,6 @@ class OscModule(ModuleBase):
         except Exception:
             state = None
         if state is not None:
-            # 接入设备的默认名与回传路径也进入变量池：未收到任何 OSC 包
-            # 时事件动作与表达式同样可以点选
             settings = self.ctx.settings
             for spec in _wired_inputs(settings, state):
                 name = default_input_name(settings, spec["key"])
@@ -126,17 +105,6 @@ class OscModule(ModuleBase):
         return sorted(pool.items())
 
     def temp_specs(self) -> list[dict]:
-        """模块自动注册的临时变量声明：接入设备的**全部核心参数**。
-
-        * 输出参数（可读）：``avatar/parameters/<默认输出名>``——桥接自动
-          写入核心输出信号实时值并按变量名回传 OSC（模块维护）；
-        * 输入参数（可写）：``avatar/parameters/<默认输入名>``——收到的
-          同名头像参数值自动镜像（波形选择、开火等，不回传），供事件流
-          绑定派发；
-        * 与输出变量同名的输入参数（如通道强度双向同名）以输出维护为准。
-
-        变量名即 OSC 回传路径，重命名即改地址（编辑后转为普通变量）。
-        """
         if self.ctx is None:
             return []
         try:
@@ -162,9 +130,7 @@ class OscModule(ModuleBase):
         self.ctx = ctx
         migrate_legacy(ctx.settings)
         materialize_names(ctx.settings)
-        _strip_auto_cards(ctx.settings)      # v1.8 事件卡片接线，已废弃
-        # 历史记账字段（v1.7 auto_exposed / v1.8-1.9 auto_wired）：废弃即清，
-        # 变量建立只看 temps 现状，不依赖任何持久账本
+        _strip_auto_cards(ctx.settings)
         for stale in ("auto_exposed", "auto_wired"):
             if stale in ctx.settings:
                 ctx.settings.pop(stale)
@@ -196,7 +162,6 @@ class OscModule(ModuleBase):
         await self.bridge.start()
 
     async def reload_config(self) -> None:
-        """映射表/前缀/临时变量变更后立即重载引擎装载（无需重启桥接）。"""
         if self.bridge is None:
             return
         for key in ("mappings", "outputs", "temps", "prefix",
@@ -213,7 +178,6 @@ class OscModule(ModuleBase):
         return self.bridge is not None and bool(getattr(self.bridge, "_running", False))
 
     def button_actions(self) -> list:
-        """负鼠按键「发送 OSC 参数」动作（随本模块安装/卸载出现与撤下）。"""
         return [ButtonAction(
             key="osc",
             label="发送 OSC 参数…",
@@ -240,29 +204,20 @@ class OscModule(ModuleBase):
         self.ctx.log(f"OSC {address} = {value}")
 
     def _on_devices_changed(self, state) -> None:
-        """设备集变化 → 通知联动页刷新维护参数声明（桥接推送循环回调）。
-
-        自动维护的临时变量由 :meth:`temp_specs` 按接入设备动态声明、由
-        桥接写入与回传，无需写配置；此处仅清理历史记账字段并让界面
-        重建（新版核心面板即见新设备的维护行）。
-        """
         settings = self.ctx.settings
-        for stale in ("auto_exposed", "auto_wired"):   # 历史记账，废弃即清
+        for stale in ("auto_exposed", "auto_wired"):
             if stale in settings:
                 settings.pop(stale)
         bus = getattr(self.ctx, "events", None)
         if bus is not None:
-            # 设备变化 = 维护参数集变化，界面需要重建（temp_specs 动态）
             bus.emit("modules_changed", self.id)
 
     def _write_temp(self, key, value) -> None:
-        """维护值 → 宿主共享临时变量空间（发行版核心无 set_temp 时跳过）。"""
         set_temp = getattr(self.ctx, "set_temp", None)
         if set_temp is not None:
             set_temp(str(key), value)
 
     def _sync_temps(self) -> None:
-        """把配置临时变量同步进桥接并重载（模块自算回传立即生效）。"""
         if self.bridge is None:
             return
         self.bridge.config["temps"] = [
@@ -271,10 +226,6 @@ class OscModule(ModuleBase):
         self.bridge.apply_config()
 
     def _reload_logic(self) -> None:
-        """请宿主重载逻辑表（新核心：临时变量进引擎与联动页面板实时值）。
-
-        发行版核心没有 reload 钩子，静默跳过——回传链路由模块自算承担。
-        """
         host = getattr(self.ctx.engine, "modules", None)
         reload_fn = getattr(host, "reload", None) if host is not None else None
         if reload_fn is None:
@@ -286,11 +237,6 @@ class OscModule(ModuleBase):
 
 
 def migrate_legacy(settings) -> bool:
-    """旧版逐参数名/input_expr/custom_inputs → ``mappings`` 行表。
-
-    只迁移真正的旧配置内容；引擎仅装载显式行，默认接线由事件流 +
-    临时变量承担（见 :meth:`OscModule._on_devices_changed`）。
-    """
     changed = False
     if not _rows(settings.get("mappings")):
         rows = _legacy_input_rows(settings)
@@ -308,16 +254,11 @@ def migrate_legacy(settings) -> bool:
     return changed
 
 
-# 回传临时变量的命名前缀由 bridge.TEMP_PATH_PREFIX 提供（模块与桥接共用）
-
-
 def _temp_path(avatar_name: str) -> str:
-    """头像参数名 → 完整回传路径临时变量名。"""
     return _TEMP_PATH_PREFIX + str(avatar_name or "").lstrip("/")
 
 
 def _strip_auto_cards(settings) -> bool:
-    """移除 v1.8 自动创建的事件卡片（OSC …（自动）），改由临时变量回传。"""
     cards = [r for r in (settings.get("events") or [])
              if isinstance(r, dict)]
     kept = [r for r in cards
@@ -330,7 +271,6 @@ def _strip_auto_cards(settings) -> bool:
 
 
 def _wired_inputs(settings, state) -> list[dict]:
-    """当前接入设备对应的核心输入参数（含全局急停，BMTR 无输入参数）。"""
     try:
         names = device_osc_names(state, settings.get("device_prefixes") or {})
     except Exception:
@@ -341,10 +281,6 @@ def _wired_inputs(settings, state) -> list[dict]:
 
 
 def _wired_outputs(settings, state) -> list[dict]:
-    """当前接入设备的核心输出参数（含全局 Action）。
-
-    返回 ``{key: 核心输出参数 id, label, name: 默认头像参数名, type}``。
-    """
     out: list[dict] = []
     try:
         names = device_osc_names(state, settings.get("device_prefixes") or {})
@@ -363,7 +299,6 @@ def _wired_outputs(settings, state) -> list[dict]:
 
 
 def materialize_names(settings) -> bool:
-    """输入行缺 ``name`` 时按设备前缀模板补默认头像参数名（仅显示层）。"""
     rows = settings.get("mappings") or []
     changed = False
     for row in rows:
@@ -404,7 +339,6 @@ def _legacy_input_rows(settings: dict) -> list[dict]:
                 continue
             text = "{" + name + "}"
         rows.append({"param": key, "expr": text})
-    # 自定义输入：并入同一核心参数的表达式（多个参数取较大值）
     for entry in (settings.get("custom_inputs") or []):
         if not isinstance(entry, dict):
             continue
