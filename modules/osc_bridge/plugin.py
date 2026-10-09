@@ -6,7 +6,7 @@ import re
 META = {
     "id": "osc_bridge",
     "name": "VRChat OSC 联动",
-    "version": "1.15.1",
+    "version": "1.15.2",
     "description": "设备接入即向核心变量表登记全部可读 / 可写参数"
                    "（变量名 = OSC 路径，带可读 / 可写标记，落在变量表可改名栏，"
                    "改名即改收发地址），事件流画布用读数 / 回传卡片直接收发。",
@@ -117,10 +117,13 @@ class OscModule(ModuleBase):
                 for name, label in sorted(pool.items())]
 
     def temp_specs(self) -> list[dict]:
-        """本模块向变量表登记的行：按当前在连设备实时算出全部可读 / 可写参数。
+        """本模块向变量表登记的行：按当前在连设备实时算出全部路径变量。
 
         变量名即 OSC 路径（设备参数 avatar/parameters/<名>，全局参数 <前缀>/<名>），
-        不落配置文件——共享变量表由核心维护，模块只负责声明与收发。
+        读写方向也一律按路径判定（见 _path_direction）：同一参数在
+        link_params / temp_specs 两处登记必须给出同一个方向，否则核心按并集
+        合并后会多出「读写」行。不落配置文件——共享变量表由核心维护，
+        模块只负责声明与收发。
         """
         if self.ctx is None:
             return []
@@ -132,28 +135,23 @@ class OscModule(ModuleBase):
         if not _has_devices(settings, state):
             return []       # 设备没连上就不预登记：连上哪个设备才出哪些参数
         specs: dict[str, dict] = {}
+
+        def add(name: str, spec: dict) -> None:
+            if name in specs:
+                return
+            writable = _path_direction(name) == "out"
+            specs[name] = {
+                "label": f"OSC {'可写' if writable else '可读'} · {spec['label']}",
+                "dir": _path_direction(name),
+                "type": str(spec.get("type") or ""),
+                "desc": ("模块登记 · 按变量名回传头像" if writable
+                         else "模块登记 · 收包镜像进同名变量")}
+
         for spec in _wired_inputs(settings, state):
-            name = _temp_path(spec.get("name")
-                              or default_input_name(settings, spec["key"]))
-            specs[name] = {"label": f"OSC 可读 · {spec['label']}", "dir": "in",
-                          "type": str(spec.get("type") or ""),
-                          "desc": "模块登记 · 收包镜像进同名变量"}
+            add(_temp_path(spec.get("name")
+                           or default_input_name(settings, spec["key"])), spec)
         for spec in _wired_outputs(settings, state):
-            name = _out_var_name(settings, spec)
-            # 方向按路径判定：avatar/parameters/* 是发给头像的参数（宿主可写回传），
-            # <前缀>/…（如 DGLab/Action）是从头像 / App 收进来的（宿主只读）。
-            sends = str(name).startswith(_TEMP_PATH_PREFIX)
-            row = specs.get(name)
-            if row is None:
-                specs[name] = {"label": f"OSC {'可写' if sends else '可读'} · "
-                                        f"{spec['label']}",
-                               "dir": "out" if sends else "in",
-                               "type": str(spec.get("type") or ""),
-                               "desc": ("模块登记 · 按变量名回传" if sends
-                                        else "模块登记 · 收包镜像进同名变量")}
-            elif sends:
-                row["dir"] = "inout"
-                row["label"] = f"OSC 可读/可写 · {spec['label']}"
+            add(_out_var_name(settings, spec), spec)
         return [{"key": key, "renamable": True, **value}
                 for key, value in sorted(specs.items())]
 

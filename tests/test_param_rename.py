@@ -113,9 +113,10 @@ class RenamableRowsTests(unittest.TestCase):
         by = {row["key"]: row for row in mod.temp_specs()}
         self.assertEqual(sorted(by[_path("DGLabStrengthA")]),
                          ["desc", "dir", "key", "label", "renamable", "type"])
-        self.assertEqual(by[_path("DGLabStrengthA")]["dir"], "inout")
-        self.assertEqual(by[_path("DGLabWaveA")]["dir"], "in")
-        self.assertEqual(by[_path("DGLabEmergency")]["dir"], "in")
+        # 方向一律按路径判定：avatar/parameters/* 可写，<前缀>/… 可读
+        self.assertEqual(by[_path("DGLabStrengthA")]["dir"], "out")
+        self.assertEqual(by[_path("DGLabWaveA")]["dir"], "out")
+        self.assertEqual(by[_path("DGLabEmergency")]["dir"], "out")
         self.assertEqual(by["DGLab/Action"]["dir"], "in")
         self.assertEqual(by[_path("DGLabBmtrPressure")]["dir"], "out")
         self.assertEqual(by[_path("DGLabBmtrPressure")]["type"], "Float")
@@ -149,7 +150,7 @@ class RenameVarTests(unittest.TestCase):
         self.assertEqual(table["in_strength_a"], "MyStrA")
         self.assertEqual(table["COYOTE.StrengthA"], "MyStrA")
         by = {row["key"]: row for row in mod.temp_specs()}
-        self.assertEqual(by[_path("MyStrA")]["dir"], "inout")
+        self.assertEqual(by[_path("MyStrA")]["dir"], "out")
         self.assertNotIn(_path("DGLabStrengthA"), by)
         self.assertEqual(default_output_name(ctx.settings, "COYOTE.StrengthA"),
                          "MyStrA")

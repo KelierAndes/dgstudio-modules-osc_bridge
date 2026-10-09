@@ -144,11 +144,16 @@ class MaintainedSpecTests(unittest.TestCase):
         self.assertIn(_path("DGLabEmergency"), specs)
         self.assertFalse(any("负鼠" in str(spec["label"])
                              for spec in specs.values()))
-        self.assertEqual(specs[_path("DGLabStrengthA")]["dir"], "inout")
+        # 方向一律按路径判定：avatar/parameters/* 宿主可写，其余宿主可读
+        self.assertEqual(specs[_path("DGLabStrengthA")]["dir"], "out")
         self.assertEqual(specs[_path("DGLabBmtrPressure")]["dir"], "out")
-        self.assertEqual(specs[_path("DGLabEmergency")]["dir"], "in")
+        self.assertEqual(specs[_path("DGLabEmergency")]["dir"], "out")
         # 全局前缀参数（DGLab/Action）是从头像 / App 收进来的：宿主只读
         self.assertEqual(specs["DGLab/Action"]["dir"], "in")
+        self.assertTrue(all(s["dir"] == ("out"
+                                        if key.startswith(TEMP_PATH_PREFIX)
+                                        else "in")
+                            for key, s in specs.items()))
 
     def test_registration_leaves_config_alone(self):
         """登记只由模块实时算出：不再往配置文件写 temps 行。"""
