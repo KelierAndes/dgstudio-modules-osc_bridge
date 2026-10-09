@@ -345,11 +345,15 @@ class LinkParamsTests(unittest.TestCase):
             OscConfig(dict(CONFIG), defaults=OSC_CONFIG_DEFAULTS),
             ctx.engine.get_state, None)
         try:
-            names = dict(mod.link_params())
-            self.assertIn(_path("DGLabStrengthA"), names)
-            self.assertIn(_path("DGLabBmtrPressure"), names)
-            self.assertIn(_path("DGLabEmergency"), names)
-            self.assertIn("DGLab/Action", names)
+            rows = {row["name"]: row for row in mod.link_params()}
+            self.assertIn(_path("DGLabStrengthA"), rows)
+            self.assertIn(_path("DGLabBmtrPressure"), rows)
+            self.assertIn(_path("DGLabEmergency"), rows)
+            self.assertIn("DGLab/Action", rows)
+            # 全部是可改名行，方向按路径：avatar/parameters/* 可写、其余可读
+            self.assertTrue(all(row["renamable"] for row in rows.values()))
+            self.assertEqual(rows[_path("DGLabBmtrPressure")]["dir"], "out")
+            self.assertEqual(rows["DGLab/Action"]["dir"], "in")
         finally:
             mod.bridge.close()
 

@@ -6,7 +6,7 @@ import re
 META = {
     "id": "osc_bridge",
     "name": "VRChat OSC 联动",
-    "version": "1.15.0",
+    "version": "1.15.1",
     "description": "设备接入即向核心变量表登记全部可读 / 可写参数"
                    "（变量名 = OSC 路径，带可读 / 可写标记，落在变量表可改名栏，"
                    "改名即改收发地址），事件流画布用读数 / 回传卡片直接收发。",
@@ -84,7 +84,12 @@ class OscModule(ModuleBase):
     def config_spec(self) -> dict:
         return META["config"]
 
-    def link_params(self) -> list[tuple[str, str]]:
+    def link_params(self) -> list[dict]:
+        """本模块向宿主登记的参数行：全部标成可改名，方向按路径判定。
+
+        返回字典而不是 (名字, 标签) 元组——元组会被宿主当成不可改名的系统参数，
+        这些头像参数本来就是用户自己的地址，要落在变量表的可改名栏里。
+        """
         if self.bridge is None:
             return []
         pool: dict[str, str] = {}
@@ -106,7 +111,10 @@ class OscModule(ModuleBase):
             for spec in _wired_outputs(settings, state):
                 pool.setdefault(_out_var_name(settings, spec),
                                 f"OSC 可写参数 · {spec['label']}")
-        return sorted(pool.items())
+        return [{"name": name, "label": label,
+                 "dir": _path_direction(name), "type": "Float",
+                 "renamable": True}
+                for name, label in sorted(pool.items())]
 
     def temp_specs(self) -> list[dict]:
         """本模块向变量表登记的行：按当前在连设备实时算出全部可读 / 可写参数。
@@ -320,6 +328,12 @@ def migrate_legacy(settings) -> bool:
         if hasattr(settings, "save"):
             settings.save()
     return changed
+
+
+def _path_direction(name) -> str:
+    """方向按路径判定：avatar/parameters/* 是发给头像的参数（宿主可写回传），
+    其余（全局 <前缀>/… 与裸头像参数名）是从头像 / App 收进来的（宿主只读）。"""
+    return "out" if str(name or "").startswith(_TEMP_PATH_PREFIX) else "in"
 
 
 def _temp_path(avatar_name: str) -> str:

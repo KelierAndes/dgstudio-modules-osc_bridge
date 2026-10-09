@@ -168,7 +168,7 @@ class RenameVarTests(unittest.TestCase):
         try:
             self.assertEqual(mod.rename_var(_path("DGLabWaveA"), _path("MyWaveA")), "")
             self.assertEqual(mod.rename_var(_path("DGLabStrengthA"), _path("MyStrA")), "")
-            names = dict(mod.link_params())
+            names = {row["name"] for row in mod.link_params()}
             self.assertIn(_path("MyWaveA"), names)
             self.assertIn(_path("MyStrA"), names)
             self.assertNotIn(_path("DGLabWaveA"), names)
