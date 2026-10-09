@@ -26,9 +26,18 @@ from dglab.waves import wave_order
 __all__ = ["OscBridge", "OscConfig", "device_osc_names", "wave_order",
            "output_map_key", "signal_specs", "OUT_SIGNALS",
            "default_input_rows", "default_output_rows", "effective_rows",
-           "default_input_name", "default_output_name", "TEMP_PATH_PREFIX"]
+           "default_input_name", "default_output_name", "TEMP_PATH_PREFIX",
+           "param_name_override"]
 
 TEMP_PATH_PREFIX = "avatar/parameters/"
+
+
+def param_name_override(config: dict, key: str) -> str:
+    """变量表里改过名的参数：param_names = {参数键: 头像参数名}。"""
+    table = config.get("param_names") or {}
+    if not isinstance(table, dict):
+        return ""
+    return str(table.get(str(key)) or "").strip()
 
 
 def _typed_value(kind: str, raw):
@@ -408,10 +417,12 @@ class OscBridge:
             for spec in output_specs(info["family"],
                                      int(info.get("index", 1))):
                 if spec["key"] in vals:
-                    self._maintain_temp(f"{info['name']}{spec['signal']}",
-                                        spec["type"], vals[spec["key"]])
+                    self._maintain_temp(
+                        param_name_override(self.config, spec["key"])
+                        or f"{info['name']}{spec['signal']}",
+                        spec["type"], vals[spec["key"]])
         self._maintain_temp(f"{str(self.config.get('prefix') or 'DGLab').strip('/')}"
-                            f"/Action",
+                            f"/{param_name_override(self.config, 'Action') or 'Action'}",
                             "Int",
                             float(self._action_value
                                   if time.monotonic() < self._action_until

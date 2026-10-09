@@ -147,7 +147,8 @@ class MaintainedSpecTests(unittest.TestCase):
         self.assertEqual(specs[_path("DGLabStrengthA")]["dir"], "inout")
         self.assertEqual(specs[_path("DGLabBmtrPressure")]["dir"], "out")
         self.assertEqual(specs[_path("DGLabEmergency")]["dir"], "in")
-        self.assertEqual(specs["DGLab/Action"]["dir"], "out")
+        # 全局前缀参数（DGLab/Action）是从头像 / App 收进来的：宿主只读
+        self.assertEqual(specs["DGLab/Action"]["dir"], "in")
 
     def test_registration_leaves_config_alone(self):
         """登记只由模块实时算出：不再往配置文件写 temps 行。"""

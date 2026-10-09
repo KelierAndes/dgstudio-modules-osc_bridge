@@ -1,13 +1,15 @@
 
 from __future__ import annotations
 
+import re
+
 META = {
     "id": "osc_bridge",
     "name": "VRChat OSC 联动",
-    "version": "1.13.1",
+    "version": "1.15.0",
     "description": "设备接入即向核心变量表登记全部可读 / 可写参数"
-                   "（变量名 = OSC 路径，带可读 / 可写标记，由模块实时维护不落配置），"
-                   "事件流画布用读数 / 回传卡片与读写变量卡片直接收发。",
+                   "（变量名 = OSC 路径，带可读 / 可写标记，落在变量表可改名栏，"
+                   "改名即改收发地址），事件流画布用读数 / 回传卡片直接收发。",
     "settings_key": "osc",
     "actions": ["osc"],
     "default_enabled": False,
@@ -62,7 +64,8 @@ from dglab.params import core_inputs as _core_inputs
 from dglab.params import output_specs as _output_specs
 from modules.osc_bridge.bridge import (OscBridge, OscConfig,
                                        TEMP_PATH_PREFIX as _TEMP_PATH_PREFIX,
-                                       default_input_name, device_osc_names)
+                                       default_input_name, default_output_name,
+                                       device_osc_names)
 
 OSC_CONFIG_DEFAULTS = spec_defaults(META["config"])
 
@@ -96,8 +99,10 @@ class OscModule(ModuleBase):
         settings = self.ctx.settings
         if state is not None and _has_devices(settings, state):
             for spec in _wired_inputs(settings, state):
-                name = default_input_name(settings, spec["key"])
-                pool.setdefault(_temp_path(name), f"OSC 可读参数 · {spec['label']}")
+                pool.setdefault(_temp_path(spec.get("name")
+                                           or default_input_name(
+                                               settings, spec["key"])),
+                                f"OSC 可读参数 · {spec['label']}")
             for spec in _wired_outputs(settings, state):
                 pool.setdefault(_out_var_name(settings, spec),
                                 f"OSC 可写参数 · {spec['label']}")
@@ -120,25 +125,77 @@ class OscModule(ModuleBase):
             return []       # 设备没连上就不预登记：连上哪个设备才出哪些参数
         specs: dict[str, dict] = {}
         for spec in _wired_inputs(settings, state):
-            name = _temp_path(default_input_name(settings, spec["key"]))
+            name = _temp_path(spec.get("name")
+                              or default_input_name(settings, spec["key"]))
             specs[name] = {"label": f"OSC 可读 · {spec['label']}", "dir": "in",
                           "type": str(spec.get("type") or ""),
                           "desc": "模块登记 · 收包镜像进同名变量"}
         for spec in _wired_outputs(settings, state):
             name = _out_var_name(settings, spec)
+            # 方向按路径判定：avatar/parameters/* 是发给头像的参数（宿主可写回传），
+            # <前缀>/…（如 DGLab/Action）是从头像 / App 收进来的（宿主只读）。
+            sends = str(name).startswith(_TEMP_PATH_PREFIX)
             row = specs.get(name)
             if row is None:
-                specs[name] = {"label": f"OSC 可写 · {spec['label']}",
-                               "dir": "out",
+                specs[name] = {"label": f"OSC {'可写' if sends else '可读'} · "
+                                        f"{spec['label']}",
+                               "dir": "out" if sends else "in",
                                "type": str(spec.get("type") or ""),
-                               "desc": "模块登记 · 按变量名回传"}
-            else:
+                               "desc": ("模块登记 · 按变量名回传" if sends
+                                        else "模块登记 · 收包镜像进同名变量")}
+            elif sends:
                 row["dir"] = "inout"
                 row["label"] = f"OSC 可读/可写 · {spec['label']}"
-        return [{"key": key, **value} for key, value in sorted(specs.items())]
+        return [{"key": key, "renamable": True, **value}
+                for key, value in sorted(specs.items())]
+
+    def _state(self):
+        try:
+            return self.ctx.engine.get_state()
+        except Exception:
+            return None
+
+    def rename_var(self, old, new) -> str:
+        """变量表里改 OSC 参数名：写进 param_names 覆盖表，登记与收发一起跟着改。
+
+        返回空串表示成功，中文说明表示失败（核心会把原名字留在卡片上）。
+        """
+        if self.ctx is None:
+            return "OSC 模块未加载，无法改名"
+        settings = self.ctx.settings
+        bare_old = _avatar_bare(old, settings)
+        bare_new = _avatar_bare(new, settings)
+        if not bare_old:
+            return "找不到要改名的 OSC 参数"
+        if not _NAME_OK.match(bare_new):
+            return "变量名需字母开头，可用字母/数字/下划线，或 a/b 形式路径"
+        if bare_new == bare_old:
+            return ""
+        resolved = {k: v for k, v in _resolved_params(
+            settings, self._state()).items() if v}
+        keys = [k for k, name in resolved.items() if name == bare_old]
+        if not keys:
+            return "找不到要改名的 OSC 参数"
+        if bare_new in set(resolved.values()):
+            return f"「{bare_new}」已被其它 OSC 参数占用，换一个名字"
+        table = dict(settings.get("param_names") or {})
+        for key in keys:
+            table[str(key)] = bare_new
+        settings["param_names"] = table
+        if hasattr(settings, "save"):
+            settings.save()
+        _retarget_expr_rows(settings, bare_old, bare_new)
+        if self.bridge is not None:
+            self.bridge.config["param_names"] = table
+            self.bridge._input_names = None
+        self.ctx.log(f"OSC 参数改名：{old} → {new}")
+        return ""
 
     def on_load(self, ctx) -> None:
         self.ctx = ctx
+        if "param_names" in ctx.settings and not isinstance(
+                ctx.settings.get("param_names"), dict):
+            ctx.settings["param_names"] = {}
         migrate_legacy(ctx.settings)
         materialize_names(ctx.settings)
         _strip_auto_cards(ctx.settings)
@@ -176,7 +233,7 @@ class OscModule(ModuleBase):
         if self.bridge is None:
             return
         for key in ("mappings", "outputs", "temps", "prefix",
-                    "device_prefixes"):
+                    "device_prefixes", "param_names"):
             self.bridge.config[key] = self.ctx.settings.get(
                 key, OSC_CONFIG_DEFAULTS.get(key))
         self.bridge.apply_config()
@@ -270,10 +327,62 @@ def _temp_path(avatar_name: str) -> str:
 
 
 def _out_var_name(settings, spec: dict) -> str:
-    """可写参数的变量名 = OSC 路径：设备参数走 avatar/parameters/，全局参数走 <前缀>/。"""
+    """可写参数的变量名 = OSC 路径：设备参数走 avatar/parameters/，全局参数走 <前缀>/。
+
+    spec["name"] 已由 _wired_outputs 套上 param_names 改名覆盖表，这里只管拼路径。
+    """
     if str(spec["key"]) == "Action":
-        return f"{str(settings.get('prefix') or 'DGLab').strip('/')}/Action"
+        prefix = str(settings.get("prefix") or "DGLab").strip("/")
+        return f"{prefix}/{_param_override(settings, 'Action') or 'Action'}"
     return _temp_path(spec["name"])
+
+
+_NAME_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PATH_PREFIX = "avatar/parameters/"
+
+
+def _avatar_bare(path, settings) -> str:
+    """OSC 路径 → 头像参数名：设备参数剥掉 avatar/parameters/，全局参数剥掉前缀。"""
+    text = str(path or "").strip().lstrip("/")
+    if not text:
+        return ""
+    if text.startswith(_PATH_PREFIX):
+        return text[len(_PATH_PREFIX):].strip()
+    prefix = str(settings.get("prefix") or "DGLab").strip("/")
+    if prefix and text.startswith(f"{prefix}/"):
+        return text[len(prefix) + 1:].strip()
+    return text.rsplit("/", 1)[-1].strip()
+
+
+def _retarget_expr_rows(settings, old: str, new: str) -> None:
+    """模块自带的表达式映射行里 {旧名} 令牌跟着改名走，别让配置指空变量。"""
+    rows = settings.get("mappings") or []
+    changed = False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        text = str(row.get("expr") or "")
+        if "{" + old + "}" in text:
+            row["expr"] = text.replace("{" + old + "}", "{" + new + "}")
+            changed = True
+    if changed:
+        settings["mappings"] = rows
+        if hasattr(settings, "save"):
+            settings.save()
+
+
+def _resolved_params(settings, state) -> dict[str, str]:
+    """{参数键: 当前头像参数名}——改名要按现有名字找回参数键，登记与收发同源。"""
+    out: dict[str, str] = {}
+    for spec in _wired_inputs(settings, state):
+        out[str(spec["key"])] = str(spec.get("name") or "")
+    for spec in _wired_outputs(settings, state):
+        out.setdefault(str(spec["key"]), str(spec.get("name") or ""))
+    for spec in _core_inputs():
+        out.setdefault(str(spec["key"]),
+                       default_input_name(settings, str(spec["key"])))
+    out["Action"] = _param_override(settings, "Action") or "Action"
+    return out
 
 
 def _strip_auto_cards(settings) -> bool:
@@ -301,14 +410,28 @@ def _has_devices(settings, state) -> bool:
         return False
 
 
+def _param_override(settings, key: str) -> str:
+    """变量表改过名的参数：param_names = {参数键: 头像参数名}。"""
+    table = settings.get("param_names") or {}
+    if not isinstance(table, dict):
+        return ""
+    return str(table.get(str(key)) or "").strip()
+
+
 def _wired_inputs(settings, state) -> list[dict]:
     try:
         names = device_osc_names(state, settings.get("device_prefixes") or {})
     except Exception:
         names = {}
     families = {info["family"] for info in names.values()}
-    return [spec for spec in _core_inputs()
-            if not spec["family"] or spec["family"] in families]
+    out: list[dict] = []
+    for spec in _core_inputs():
+        if spec["family"] and spec["family"] not in families:
+            continue
+        item = dict(spec)
+        item["name"] = _param_override(settings, item["key"]) or             default_input_name(settings, str(item["key"]))
+        out.append(item)
+    return out
 
 
 def _wired_outputs(settings, state) -> list[dict]:
@@ -321,7 +444,8 @@ def _wired_outputs(settings, state) -> list[dict]:
         info = names[sid]
         for spec in _output_specs(info["family"], int(info.get("index", 1))):
             out.append({"key": spec["key"], "label": spec["label"],
-                        "name": f"{info['name']}{spec['signal']}",
+                        "name": _param_override(settings, spec["key"])
+                        or f"{info['name']}{spec['signal']}",
                         "type": spec["type"]})
     prefix = str(settings.get("prefix") or "DGLab")
     out.append({"key": "Action", "label": "App 按键反馈",
