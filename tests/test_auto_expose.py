@@ -137,29 +137,52 @@ class MaintainedSpecTests(unittest.TestCase):
         specs = {spec["key"]: spec for spec in mod.temp_specs()}
         self.assertIn(_path("DGLabStrengthA"), specs)
         self.assertIn(_path("DGLabBmtrPressure"), specs)
-        self.assertIn(_path("DGLabAction"), specs)
+        self.assertIn("DGLab/Action", specs)
         self.assertIn(_path("DGLabWaveA"), specs)
         self.assertIn(_path("DGLabWaveStepB"), specs)
         self.assertIn(_path("DGLabFire"), specs)
         self.assertIn(_path("DGLabEmergency"), specs)
         self.assertFalse(any("负鼠" in str(spec["label"])
                              for spec in specs.values()))
-        self.assertIn("模块自动维护", specs[_path("DGLabStrengthA")]["desc"])
-        self.assertIn("镜像", specs[_path("DGLabWaveA")]["desc"])
+        self.assertEqual(specs[_path("DGLabStrengthA")]["dir"], "inout")
+        self.assertEqual(specs[_path("DGLabBmtrPressure")]["dir"], "out")
+        self.assertEqual(specs[_path("DGLabEmergency")]["dir"], "in")
+        self.assertEqual(specs["DGLab/Action"]["dir"], "out")
 
-    def test_no_state_no_specs(self):
-        mod, ctx = _make_module(None)
-        self.assertEqual(mod.temp_specs(), [])
-
-    def test_no_config_rows_written_no_ledger(self):
+    def test_registration_leaves_config_alone(self):
+        """登记只由模块实时算出：不再往配置文件写 temps 行。"""
         mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
         mod._on_devices_changed(ctx.engine.get_state())
+        names = {spec["key"] for spec in mod.temp_specs()}
+        self.assertIn(_path("DGLabStrengthA"), names)
+        self.assertIn("DGLab/Action", names)
         self.assertNotIn("temps", ctx.settings)
         self.assertNotIn("auto_wired", ctx.settings)
         self.assertNotIn("auto_exposed", ctx.settings)
-        self.assertNotIn("events", ctx.settings)
-        self.assertEqual(ctx.events.emitted,
-                         [("modules_changed", "osc_bridge")])
+
+    def test_legacy_config_rows_are_dropped(self):
+        mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
+        ctx.settings["temps"] = [{"name": "avatar/parameters/MyOwn",
+                                  "dir": "out", "label": "自定义"}]
+        mod._on_devices_changed(ctx.engine.get_state())
+        self.assertNotIn("temps", ctx.settings)
+        self.assertNotIn("avatar/parameters/MyOwn",
+                         {spec["key"] for spec in mod.temp_specs()})
+
+    def test_no_device_registers_nothing(self):
+        """设备没连上就不预登记：空槽位与无 state 两种情况都应为空。"""
+        for state in (None, EngineState(backend="v4")):
+            mod, ctx = _make_module(state)
+            self.assertEqual(mod.temp_specs(), [])
+            self.assertEqual([name for name, _label in mod.link_params()], [])
+
+    def test_only_connected_families_register(self):
+        mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
+        keys = {spec["key"] for spec in mod.temp_specs()}
+        self.assertIn("DGLab/Action", keys)
+        self.assertIn(_path("DGLabStrengthA"), keys)
+        self.assertNotIn(_path("DGLabOvcStrengthA"), keys)
+        self.assertNotIn(_path("DGLabBmtrPressure"), keys)
 
     def test_stale_ledgers_cleaned_on_load_and_connect(self):
         mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
@@ -249,8 +272,8 @@ class MaintainedPushTests(unittest.TestCase):
             self.assertEqual(addrs[_addr("DGLabStrengthA")], 55)
             self.assertEqual(addrs[_addr("DGLabBmtrPressure")], 7.912)
             self.assertIs(addrs[_addr("DGLabConnected")], True)
-            self.assertIn(_addr("DGLabAction"), addrs)
-            self.assertEqual(addrs[_addr("DGLabAction")], 0)
+            self.assertIn("/DGLab/Action", addrs)
+            self.assertEqual(addrs["/DGLab/Action"], 0)
             self.assertEqual(written.get(_path("DGLabStrengthA")), 55)
             count = len(sent)
             bridge._push_maintained(state)
@@ -311,7 +334,8 @@ class LinkParamsTests(unittest.TestCase):
             names = dict(mod.link_params())
             self.assertIn(_path("DGLabStrengthA"), names)
             self.assertIn(_path("DGLabBmtrPressure"), names)
-            self.assertIn("DGLabEmergency", names)
+            self.assertIn(_path("DGLabEmergency"), names)
+            self.assertIn("DGLab/Action", names)
         finally:
             mod.bridge.close()
 

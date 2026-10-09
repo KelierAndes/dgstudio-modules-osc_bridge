@@ -4,10 +4,10 @@ from __future__ import annotations
 META = {
     "id": "osc_bridge",
     "name": "VRChat OSC 联动",
-    "version": "1.11.0",
-    "description": "头像参数动态建表；设备接入即自动维护完整 OSC 路径命名的"
-                   "回传临时变量（重命名即改地址），联动页面板可见，"
-                   "不建事件流、不写映射表。",
+    "version": "1.13.0",
+    "description": "设备接入即向核心变量表登记全部可读 / 可写参数"
+                   "（变量名 = OSC 路径，带可读 / 可写标记，由模块实时维护不落配置），"
+                   "事件流画布用读数 / 回传卡片与读写变量卡片直接收发。",
     "settings_key": "osc",
     "actions": ["osc"],
     "default_enabled": False,
@@ -93,45 +93,53 @@ class OscModule(ModuleBase):
             state = self.bridge.get_state()
         except Exception:
             state = None
-        if state is not None:
-            settings = self.ctx.settings
+        settings = self.ctx.settings
+        if state is not None and _has_devices(settings, state):
             for spec in _wired_inputs(settings, state):
                 name = default_input_name(settings, spec["key"])
-                pool.setdefault(name, f"头像参数默认名 · {name}")
+                pool.setdefault(_temp_path(name), f"OSC 可读参数 · {spec['label']}")
             for spec in _wired_outputs(settings, state):
-                path = _temp_path(spec["name"])
-                pool.setdefault(spec["name"], f"头像参数默认名 · {spec['name']}")
-                pool.setdefault(path, f"OSC 回传路径（临时变量） · {spec['label']}")
+                pool.setdefault(_out_var_name(settings, spec),
+                                f"OSC 可写参数 · {spec['label']}")
         return sorted(pool.items())
 
     def temp_specs(self) -> list[dict]:
+        """本模块向变量表登记的行：按当前在连设备实时算出全部可读 / 可写参数。
+
+        变量名即 OSC 路径（设备参数 avatar/parameters/<名>，全局参数 <前缀>/<名>），
+        不落配置文件——共享变量表由核心维护，模块只负责声明与收发。
+        """
         if self.ctx is None:
             return []
         try:
             state = self.ctx.engine.get_state()
         except Exception:
-            return []
-        if state is None:
-            return []
+            state = None
         settings = self.ctx.settings
+        if not _has_devices(settings, state):
+            return []       # 设备没连上就不预登记：连上哪个设备才出哪些参数
         specs: dict[str, dict] = {}
-        for spec in _wired_outputs(settings, state):
-            specs[_temp_path(spec["name"])] = {
-                "label": str(spec["label"]),
-                "desc": f"模块自动维护（{spec['type']}）· 按变量名回传"}
         for spec in _wired_inputs(settings, state):
-            name = default_input_name(settings, spec["key"])
-            specs.setdefault(_temp_path(name), {
-                "label": str(spec["label"]),
-                "desc": "收包值自动镜像（模块维护）· 事件流绑定派发用"})
-        return [{"key": key, **item} for key, item in specs.items()]
+            name = _temp_path(default_input_name(settings, spec["key"]))
+            specs[name] = {"label": f"OSC 可读 · {spec['label']}", "dir": "in",
+                           "desc": "模块登记 · 收包镜像进同名变量"}
+        for spec in _wired_outputs(settings, state):
+            name = _out_var_name(settings, spec)
+            row = specs.get(name)
+            if row is None:
+                specs[name] = {"label": f"OSC 可写 · {spec['label']}",
+                               "dir": "out", "desc": "模块登记 · 按变量名回传"}
+            else:
+                row["dir"] = "inout"
+                row["label"] = f"OSC 可读/可写 · {spec['label']}"
+        return [{"key": key, **value} for key, value in sorted(specs.items())]
 
     def on_load(self, ctx) -> None:
         self.ctx = ctx
         migrate_legacy(ctx.settings)
         materialize_names(ctx.settings)
         _strip_auto_cards(ctx.settings)
-        for stale in ("auto_exposed", "auto_wired"):
+        for stale in ("auto_exposed", "auto_wired", "temps"):
             if stale in ctx.settings:
                 ctx.settings.pop(stale)
 
@@ -205,7 +213,7 @@ class OscModule(ModuleBase):
 
     def _on_devices_changed(self, state) -> None:
         settings = self.ctx.settings
-        for stale in ("auto_exposed", "auto_wired"):
+        for stale in ("auto_exposed", "auto_wired", "temps"):
             if stale in settings:
                 settings.pop(stale)
         bus = getattr(self.ctx, "events", None)
@@ -258,6 +266,13 @@ def _temp_path(avatar_name: str) -> str:
     return _TEMP_PATH_PREFIX + str(avatar_name or "").lstrip("/")
 
 
+def _out_var_name(settings, spec: dict) -> str:
+    """可写参数的变量名 = OSC 路径：设备参数走 avatar/parameters/，全局参数走 <前缀>/。"""
+    if str(spec["key"]) == "Action":
+        return f"{str(settings.get('prefix') or 'DGLab').strip('/')}/Action"
+    return _temp_path(spec["name"])
+
+
 def _strip_auto_cards(settings) -> bool:
     cards = [r for r in (settings.get("events") or [])
              if isinstance(r, dict)]
@@ -268,6 +283,16 @@ def _strip_auto_cards(settings) -> bool:
         settings["events"] = kept
         return True
     return False
+
+
+def _has_devices(settings, state) -> bool:
+    """有没有设备在连：没有槽位就什么都不登记，避免提前铺一表参数。"""
+    if state is None:
+        return False
+    try:
+        return bool(device_osc_names(state, settings.get("device_prefixes") or {}))
+    except Exception:
+        return False
 
 
 def _wired_inputs(settings, state) -> list[dict]:

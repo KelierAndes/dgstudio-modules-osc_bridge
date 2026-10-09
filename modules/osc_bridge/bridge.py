@@ -410,14 +410,16 @@ class OscBridge:
                 if spec["key"] in vals:
                     self._maintain_temp(f"{info['name']}{spec['signal']}",
                                         spec["type"], vals[spec["key"]])
-        self._maintain_temp(f"{self.config.get('prefix') or 'DGLab'}Action",
+        self._maintain_temp(f"{str(self.config.get('prefix') or 'DGLab').strip('/')}"
+                            f"/Action",
                             "Int",
                             float(self._action_value
                                   if time.monotonic() < self._action_until
                                   else 0))
 
     def _maintain_temp(self, avatar_name: str, kind: str, raw) -> None:
-        name = f"{TEMP_PATH_PREFIX}{str(avatar_name or '').lstrip('/')}"
+        raw_name = str(avatar_name or "").lstrip("/")
+        name = raw_name if "/" in raw_name else f"{TEMP_PATH_PREFIX}{raw_name}"
         self._maintained_keys.add(name)
         self._no_send.discard(name)
         value = _typed_value(kind, raw)
