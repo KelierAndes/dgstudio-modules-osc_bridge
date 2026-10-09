@@ -171,10 +171,23 @@ class MaintainedSpecTests(unittest.TestCase):
 
     def test_no_device_registers_nothing(self):
         """设备没连上就不预登记：空槽位与无 state 两种情况都应为空。"""
-        for state in (None, EngineState(backend="v4")):
+        for state in (None, EngineState(backend="v4"),
+                      EngineState(backend="v4", connected=True),
+                      EngineState(backend="v4", paired=True)):
             mod, ctx = _make_module(state)
             self.assertEqual(mod.temp_specs(), [])
             self.assertEqual([name for name, _label in mod.link_params()], [])
+
+    def test_stale_slots_without_link_register_nothing(self):
+        """槽位残留但链路未连接：仍然不能登记（概览显示 0 台的场景）。"""
+        state = EngineState(backend="v4")
+        state.slots["c1"] = Slot(slot_id="c1", type="COYOTE_030")
+        mod, ctx = _make_module(state)
+        self.assertEqual(mod.temp_specs(), [])
+        self.assertEqual([name for name, _label in mod.link_params()], [])
+        state.connected = True
+        state.paired = True
+        self.assertIn("DGLab/Action", {spec["key"] for spec in mod.temp_specs()})
 
     def test_only_connected_families_register(self):
         mod, ctx = _make_module(_state(("c1", "COYOTE_030")))

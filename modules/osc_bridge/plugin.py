@@ -4,7 +4,7 @@ from __future__ import annotations
 META = {
     "id": "osc_bridge",
     "name": "VRChat OSC 联动",
-    "version": "1.13.0",
+    "version": "1.13.1",
     "description": "设备接入即向核心变量表登记全部可读 / 可写参数"
                    "（变量名 = OSC 路径，带可读 / 可写标记，由模块实时维护不落配置），"
                    "事件流画布用读数 / 回传卡片与读写变量卡片直接收发。",
@@ -122,13 +122,16 @@ class OscModule(ModuleBase):
         for spec in _wired_inputs(settings, state):
             name = _temp_path(default_input_name(settings, spec["key"]))
             specs[name] = {"label": f"OSC 可读 · {spec['label']}", "dir": "in",
-                           "desc": "模块登记 · 收包镜像进同名变量"}
+                          "type": str(spec.get("type") or ""),
+                          "desc": "模块登记 · 收包镜像进同名变量"}
         for spec in _wired_outputs(settings, state):
             name = _out_var_name(settings, spec)
             row = specs.get(name)
             if row is None:
                 specs[name] = {"label": f"OSC 可写 · {spec['label']}",
-                               "dir": "out", "desc": "模块登记 · 按变量名回传"}
+                               "dir": "out",
+                               "type": str(spec.get("type") or ""),
+                               "desc": "模块登记 · 按变量名回传"}
             else:
                 row["dir"] = "inout"
                 row["label"] = f"OSC 可读/可写 · {spec['label']}"
@@ -286,8 +289,11 @@ def _strip_auto_cards(settings) -> bool:
 
 
 def _has_devices(settings, state) -> bool:
-    """有没有设备在连：没有槽位就什么都不登记，避免提前铺一表参数。"""
+    """设备真的连着才算：槽位会残留历史设备，只有 connected + paired 同时为真
+    才登记参数，否则变量表里会提前铺一表拿不到值的 avatar 参数。"""
     if state is None:
+        return False
+    if not (getattr(state, "connected", False) and getattr(state, "paired", False)):
         return False
     try:
         return bool(device_osc_names(state, settings.get("device_prefixes") or {}))
