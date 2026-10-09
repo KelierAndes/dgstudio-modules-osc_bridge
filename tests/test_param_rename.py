@@ -113,12 +113,12 @@ class RenamableRowsTests(unittest.TestCase):
         by = {row["key"]: row for row in mod.temp_specs()}
         self.assertEqual(sorted(by[_path("DGLabStrengthA")]),
                          ["desc", "dir", "key", "label", "renamable", "type"])
-        # 方向一律按路径判定：avatar/parameters/* 可写，<前缀>/… 可读
-        self.assertEqual(by[_path("DGLabStrengthA")]["dir"], "out")
+        # 方向按参数语义：核心输入参数可写、设备回传读数可读、两边都有则读写
+        self.assertEqual(by[_path("DGLabStrengthA")]["dir"], "inout")
         self.assertEqual(by[_path("DGLabWaveA")]["dir"], "out")
         self.assertEqual(by[_path("DGLabEmergency")]["dir"], "out")
         self.assertEqual(by["DGLab/Action"]["dir"], "in")
-        self.assertEqual(by[_path("DGLabBmtrPressure")]["dir"], "out")
+        self.assertEqual(by[_path("DGLabBmtrPressure")]["dir"], "in")
         self.assertEqual(by[_path("DGLabBmtrPressure")]["type"], "Float")
 
     def test_unconnected_device_still_registers_nothing(self):
@@ -150,7 +150,7 @@ class RenameVarTests(unittest.TestCase):
         self.assertEqual(table["in_strength_a"], "MyStrA")
         self.assertEqual(table["COYOTE.StrengthA"], "MyStrA")
         by = {row["key"]: row for row in mod.temp_specs()}
-        self.assertEqual(by[_path("MyStrA")]["dir"], "out")
+        self.assertEqual(by[_path("MyStrA")]["dir"], "inout")
         self.assertNotIn(_path("DGLabStrengthA"), by)
         self.assertEqual(default_output_name(ctx.settings, "COYOTE.StrengthA"),
                          "MyStrA")

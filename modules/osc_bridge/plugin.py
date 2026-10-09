@@ -6,7 +6,7 @@ import re
 META = {
     "id": "osc_bridge",
     "name": "VRChat OSC 联动",
-    "version": "1.15.2",
+    "version": "1.16.0",
     "description": "设备接入即向核心变量表登记全部可读 / 可写参数"
                    "（变量名 = OSC 路径，带可读 / 可写标记，落在变量表可改名栏，"
                    "改名即改收发地址），事件流画布用读数 / 回传卡片直接收发。",
@@ -85,17 +85,19 @@ class OscModule(ModuleBase):
         return META["config"]
 
     def link_params(self) -> list[dict]:
-        """本模块向宿主登记的参数行：全部标成可改名，方向按路径判定。
+        """本模块向宿主登记的参数行：全部标成可改名，方向按参数语义判定。
 
         返回字典而不是 (名字, 标签) 元组——元组会被宿主当成不可改名的系统参数，
         这些头像参数本来就是用户自己的地址，要落在变量表的可改名栏里。
         """
         if self.bridge is None:
             return []
-        pool: dict[str, str] = {}
+        pool: dict[str, dict] = {}
         for name in self.bridge.param_names():
             if name != "change":
-                pool[name] = f"头像参数 · {name}"
+                # 动态参数表：收到哪个头像参数才建哪一行，收进来即宿主可读
+                pool[name] = {"label": f"头像参数 · {name}", "dir": "in",
+                              "type": "Float"}
         state = None
         try:
             state = self.bridge.get_state()
@@ -103,27 +105,18 @@ class OscModule(ModuleBase):
             state = None
         settings = self.ctx.settings
         if state is not None and _has_devices(settings, state):
-            for spec in _wired_inputs(settings, state):
-                pool.setdefault(_temp_path(spec.get("name")
-                                           or default_input_name(
-                                               settings, spec["key"])),
-                                f"OSC 可读参数 · {spec['label']}")
-            for spec in _wired_outputs(settings, state):
-                pool.setdefault(_out_var_name(settings, spec),
-                                f"OSC 可写参数 · {spec['label']}")
-        return [{"name": name, "label": label,
-                 "dir": _path_direction(name), "type": "Float",
-                 "renamable": True}
-                for name, label in sorted(pool.items())]
+            for name, row in _wired_rows(settings, state).items():
+                pool.setdefault(name, row)
+        return [{"name": name, "label": row["label"], "dir": row["dir"],
+                 "type": row["type"], "renamable": True}
+                for name, row in sorted(pool.items())]
 
     def temp_specs(self) -> list[dict]:
         """本模块向变量表登记的行：按当前在连设备实时算出全部路径变量。
 
         变量名即 OSC 路径（设备参数 avatar/parameters/<名>，全局参数 <前缀>/<名>），
-        读写方向也一律按路径判定（见 _path_direction）：同一参数在
-        link_params / temp_specs 两处登记必须给出同一个方向，否则核心按并集
-        合并后会多出「读写」行。不落配置文件——共享变量表由核心维护，
-        模块只负责声明与收发。
+        方向按参数语义判定（见 _wired_rows）：核心输入参数宿主可写、设备回传
+        读数宿主可读。不落配置文件——共享变量表由核心维护，模块只负责声明与收发。
         """
         if self.ctx is None:
             return []
@@ -134,26 +127,8 @@ class OscModule(ModuleBase):
         settings = self.ctx.settings
         if not _has_devices(settings, state):
             return []       # 设备没连上就不预登记：连上哪个设备才出哪些参数
-        specs: dict[str, dict] = {}
-
-        def add(name: str, spec: dict) -> None:
-            if name in specs:
-                return
-            writable = _path_direction(name) == "out"
-            specs[name] = {
-                "label": f"OSC {'可写' if writable else '可读'} · {spec['label']}",
-                "dir": _path_direction(name),
-                "type": str(spec.get("type") or ""),
-                "desc": ("模块登记 · 按变量名回传头像" if writable
-                         else "模块登记 · 收包镜像进同名变量")}
-
-        for spec in _wired_inputs(settings, state):
-            add(_temp_path(spec.get("name")
-                           or default_input_name(settings, spec["key"])), spec)
-        for spec in _wired_outputs(settings, state):
-            add(_out_var_name(settings, spec), spec)
         return [{"key": key, "renamable": True, **value}
-                for key, value in sorted(specs.items())]
+                for key, value in sorted(_wired_rows(settings, state).items())]
 
     def _state(self):
         try:
@@ -328,10 +303,32 @@ def migrate_legacy(settings) -> bool:
     return changed
 
 
-def _path_direction(name) -> str:
-    """方向按路径判定：avatar/parameters/* 是发给头像的参数（宿主可写回传），
-    其余（全局 <前缀>/… 与裸头像参数名）是从头像 / App 收进来的（宿主只读）。"""
-    return "out" if str(name or "").startswith(_TEMP_PATH_PREFIX) else "in"
+def _wired_rows(settings, state) -> dict[str, dict]:
+    """{变量名: 登记行}，方向按**参数语义**判定，不按路径判定。
+
+    核心输入参数（强度 / 波形 / 步进 / 开火 / 急停…）是宿主能驱动下去的量 →
+    可写；设备回传信号（电量 / 连接状态 / 通道状态 / 上限 / 气压 / 按键反馈）
+    只能被读出来 → 可读。两类都挂在 avatar/parameters/ 路径下，只看路径会把
+    电量这类读数也误标成可写。同名两边都有（通道强度既下发又回读）记成读写。
+    """
+    rows: dict[str, dict] = {}
+    for spec in _wired_inputs(settings, state):
+        name = _temp_path(spec.get("name")
+                          or default_input_name(settings, spec["key"]))
+        rows[name] = {"label": f"OSC 可写 · {spec['label']}", "dir": "out",
+                      "type": str(spec.get("type") or ""),
+                      "desc": "模块登记 · 按变量名回传头像"}
+    for spec in _wired_outputs(settings, state):
+        name = _out_var_name(settings, spec)
+        row = rows.get(name)
+        if row is None:
+            rows[name] = {"label": f"OSC 可读 · {spec['label']}", "dir": "in",
+                          "type": str(spec.get("type") or ""),
+                          "desc": "模块登记 · 收包镜像进同名变量"}
+        else:
+            row["dir"] = "inout"
+            row["label"] = f"OSC 读写 · {spec['label']}"
+    return rows
 
 
 def _temp_path(avatar_name: str) -> str:

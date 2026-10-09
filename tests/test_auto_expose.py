@@ -144,16 +144,16 @@ class MaintainedSpecTests(unittest.TestCase):
         self.assertIn(_path("DGLabEmergency"), specs)
         self.assertFalse(any("负鼠" in str(spec["label"])
                              for spec in specs.values()))
-        # 方向一律按路径判定：avatar/parameters/* 宿主可写，其余宿主可读
-        self.assertEqual(specs[_path("DGLabStrengthA")]["dir"], "out")
-        self.assertEqual(specs[_path("DGLabBmtrPressure")]["dir"], "out")
+        # 方向按参数语义：能驱动下去的核心输入参数可写，设备回传读数只读
+        self.assertEqual(specs[_path("DGLabStrengthA")]["dir"], "inout")
+        self.assertEqual(specs[_path("DGLabBmtrPressure")]["dir"], "in")
         self.assertEqual(specs[_path("DGLabEmergency")]["dir"], "out")
-        # 全局前缀参数（DGLab/Action）是从头像 / App 收进来的：宿主只读
+        # 全局前缀参数（DGLab/Action）是 App 按键反馈：宿主只读
         self.assertEqual(specs["DGLab/Action"]["dir"], "in")
-        self.assertTrue(all(s["dir"] == ("out"
-                                        if key.startswith(TEMP_PATH_PREFIX)
-                                        else "in")
-                            for key, s in specs.items()))
+        for key, spec in specs.items():
+            if any(tail in key for tail in ("Battery", "Connected", "ChannelOK",
+                                            "Limit", "Pressure", "EdgeState")):
+                self.assertEqual(spec["dir"], "in", key)
 
     def test_registration_leaves_config_alone(self):
         """登记只由模块实时算出：不再往配置文件写 temps 行。"""
@@ -355,9 +355,10 @@ class LinkParamsTests(unittest.TestCase):
             self.assertIn(_path("DGLabBmtrPressure"), rows)
             self.assertIn(_path("DGLabEmergency"), rows)
             self.assertIn("DGLab/Action", rows)
-            # 全部是可改名行，方向按路径：avatar/parameters/* 可写、其余可读
+            # 全部是可改名行；方向按语义：设备回传读数可读、控制量可写
             self.assertTrue(all(row["renamable"] for row in rows.values()))
-            self.assertEqual(rows[_path("DGLabBmtrPressure")]["dir"], "out")
+            self.assertEqual(rows[_path("DGLabBmtrPressure")]["dir"], "in")
+            self.assertEqual(rows[_path("DGLabEmergency")]["dir"], "out")
             self.assertEqual(rows["DGLab/Action"]["dir"], "in")
         finally:
             mod.bridge.close()
