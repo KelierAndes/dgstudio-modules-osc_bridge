@@ -1,9 +1,0 @@
-{
-  "version": 1,
-  "name": "头像开火键",
-  "description": "模块自带的默认按键映射：负鼠 A/B 键分别触发头像的开火 A/B 参数。",
-  "bindings": {
-    "13": "osc:/avatar/parameters/DGLabFireA",
-    "14": "osc:/avatar/parameters/DGLabFireB"
-  }
-}

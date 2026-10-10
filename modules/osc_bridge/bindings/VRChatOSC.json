@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "name": "VRChatOSC",
+  "saved_at": "2026-10-11 02:59:35",
+  "bindings": {
+    "0": "osc:/input/Voice",
+    "1": "osc:/input/QuickMenuToggleRight",
+    "2": "none",
+    "8": "osc:/input/MoveForward",
+    "9": "osc:/input/MoveBackward",
+    "10": "osc:/input/MoveLeft",
+    "11": "osc:/input/MoveRight",
+    "12": "osc:/input/LookRight",
+    "13": "osc:/input/Jump",
+    "14": "osc:/input/Run",
+    "15": "osc:/input/LookLeft"
+  }
+}
