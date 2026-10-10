@@ -6,7 +6,7 @@ import re
 META = {
     "id": "osc_bridge",
     "name": "VRChat OSC 联动",
-    "version": "1.20.0",
+    "version": "1.20.1",
     "description": "设备接入即向核心变量表登记全部可读 / 可写参数"
                    "（变量名 = OSC 路径，带可读 / 可写标记，落在变量表可改名栏，"
                    "改名即改收发地址），事件流画布用读数 / 回传卡片直接收发。",

@@ -170,14 +170,21 @@ class OscBridge:
             return
         self._action_value = int(action)
         self._action_until = time.monotonic() + 0.3
+        self._last_send_fail_log = 0.0
 
     def send_value(self, address: str, value) -> None:
         try:
             self._client.send_message(address, value)
         except Exception as exc:
             log = getattr(self, "log", None)
-            if log is not None:
-                log(f"OSC 发送 {address} 失败: {exc!r}")
+            if log is None:
+                return
+            # socket 挂掉时每个 tick 都会发失败：限流，别按发送频率刷日志
+            now = time.monotonic()
+            if now - self._last_send_fail_log < 30.0:
+                return
+            self._last_send_fail_log = now
+            log(f"OSC 发送 {address} 失败: {exc!r}")
 
     def _track_input(self, addr: str, *args) -> None:
         self.last_rx = time.monotonic()
