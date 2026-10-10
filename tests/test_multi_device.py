@@ -11,8 +11,7 @@ import unittest
 
 from dglab.socket_v4 import SocketV4Client
 from dglab.state import EngineState, Slot, StateEvents, family_of
-from modules.osc_bridge.bridge import (OscBridge, OscConfig, default_output_rows,
-                                       device_osc_names)
+from modules.osc_bridge.bridge import OscBridge, OscConfig, device_osc_names
 
 
 def _state_with(slots: dict[str, tuple[str, int, int]]) -> EngineState:
@@ -49,6 +48,7 @@ class OscNamingTests(unittest.TestCase):
         self.assertEqual(names["ovc-1"]["family"], "OVC")
 
     def test_push_state_per_device(self):
+        """设备读数按各自前缀登记并回传，不必先配任何映射表。"""
         state = _state_with({
             "slot-a": ("COYOTE_030", 11, 7),
             "slot-b": ("COYOTE_030", 20, 30),
@@ -57,28 +57,34 @@ class OscNamingTests(unittest.TestCase):
         state.slots["bmtr-1"].pressure = 7.9
         state.slots["bmtr-1"].edge_state = 2
 
-        cfg = OscConfig({"rate_hz": 100})
-        cfg["outputs"] = default_output_rows(cfg, state)
-        bridge = OscBridge(cfg, lambda: state, None)
+        bridge = OscBridge(OscConfig({"rate_hz": 100}), lambda: state)
         sent: dict[str, object] = {}
-        bridge._send_param = lambda name, value: sent.__setitem__(name, value)
-        bridge.apply_config()
+        bridge.send_value = lambda address, value: sent.__setitem__(
+            str(address).lstrip("/"), value)
+        written: dict[str, object] = {}
+        bridge._set_temp = written.__setitem__
+        bridge._push_maintained(state)
         bridge._push_values()
 
-        self.assertEqual(sent.get("DGLabStrengthA"), 11)
-        self.assertEqual(sent.get("DGLab2StrengthA"), 20)
-        self.assertEqual(sent.get("DGLab2StrengthB"), 30)
-        self.assertEqual(sent.get("DGLabBmtrPressure"), 7.9)
-        self.assertEqual(sent.get("DGLabBmtrEdgeState"), 2)
-        self.assertNotIn("DGLabPressure", sent)
+        self.assertEqual(sent.get("avatar/parameters/DGLabStrengthA"), 11)
+        self.assertEqual(sent.get("avatar/parameters/DGLab2StrengthA"), 20)
+        self.assertEqual(sent.get("avatar/parameters/DGLab2StrengthB"), 30)
+        self.assertEqual(sent.get("avatar/parameters/DGLabBmtrPressure"), 7.9)
+        self.assertEqual(sent.get("avatar/parameters/DGLabBmtrEdgeState"), 2)
+        self.assertNotIn("avatar/parameters/DGLabPressure", sent)
+        # 登记与发送同源：变量表里出现的名字就是发出去的路径
+        self.assertEqual(written.get("avatar/parameters/DGLabBmtrPressure"), 7.9)
 
-    def test_input_target_prefers_coyote(self):
-        state = _state_with({
-            "ovc-1": ("OVC_1", 0, 0),
-            "slot-a": ("COYOTE_030", 0, 0),
-        })
-        bridge = OscBridge(OscConfig(), lambda: state, None)
-        self.assertEqual(bridge.input_target_slot(), "slot-a")
+    def test_bridge_holds_no_device_command_surface(self):
+        """桥不许再握着核心命令对象：那套映射派发绕过了「模块不得直写设备」。"""
+        state = _state_with({"slot-a": ("COYOTE_030", 0, 0)})
+        bridge = OscBridge(OscConfig(), lambda: state)
+        self.assertFalse(hasattr(bridge, "commands"))
+        self.assertFalse(hasattr(bridge, "dispatchers"))
+        self.assertFalse(hasattr(bridge, "input_target_slot"))
+        self.assertFalse(hasattr(bridge.engine, "set_mappings"))
+        self.assertFalse(hasattr(bridge.engine, "set_outputs"))
+        self.assertFalse(hasattr(bridge.engine, "signal"))
 
 
 class V4SlotRoutingTests(unittest.TestCase):

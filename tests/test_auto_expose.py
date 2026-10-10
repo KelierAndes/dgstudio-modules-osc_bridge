@@ -10,8 +10,7 @@ import _bootstrap  # noqa: F401  定位 DGStudio 核心仓库
 import unittest
 
 from dglab.state import EngineState, Slot
-from modules.osc_bridge.bridge import (TEMP_PATH_PREFIX, OscBridge, OscConfig,
-                                       effective_rows)
+from modules.osc_bridge.bridge import TEMP_PATH_PREFIX, OscBridge, OscConfig
 from modules.osc_bridge.plugin import OSC_CONFIG_DEFAULTS, OscModule
 
 CONFIG = {"prefix": "DGLab", "in_port": 19001,
@@ -112,22 +111,23 @@ def _make_module(state=None) -> tuple[OscModule, _Ctx]:
     return mod, ctx
 
 
-class EffectiveRowsTests(unittest.TestCase):
-    def test_no_default_rows_without_config(self):
-        rows_in, rows_out = effective_rows({}, None)
-        self.assertEqual(rows_in, [])
-        self.assertEqual(rows_out, [])
+class NoMappingLayerTests(unittest.TestCase):
+    """映射表与表达式行已经退役：登记与收发都不读它们。"""
 
-    def test_explicit_rows_pass_through(self):
-        rows_in, rows_out = effective_rows(
-            {"mappings": [{"param": "in_strength_a", "expr": "{MyStr}"}],
-             "outputs": [{"param": "COYOTE.Battery", "name": "Bat",
-                          "expr": "{COYOTE.Battery}", "type": "Int"}]},
-            None)
-        self.assertEqual([row["param"] for row in rows_in],
-                         ["in_strength_a"])
-        self.assertEqual([row["param"] for row in rows_out],
-                         ["COYOTE.Battery"])
+    def test_config_never_seeds_mapping_rows(self):
+        mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
+        self.assertNotIn("mappings", ctx.settings)
+        self.assertNotIn("outputs", ctx.settings)
+
+    def test_retired_rows_do_not_change_registration(self):
+        state = _state(("c1", "COYOTE_030"))
+        keys = {spec["key"] for spec in _make_module(state)[0].temp_specs()}
+        mod, ctx = _make_module(state)
+        ctx.settings["mappings"] = [{"param": "in_strength_a",
+                                     "expr": "{Whatever}"}]
+        ctx.settings["outputs"] = [{"param": "COYOTE.StrengthA",
+                                    "name": "Nope", "expr": "{X}"}]
+        self.assertEqual({spec["key"] for spec in mod.temp_specs()}, keys)
 
 
 class MaintainedSpecTests(unittest.TestCase):
@@ -182,7 +182,7 @@ class MaintainedSpecTests(unittest.TestCase):
                       EngineState(backend="v4", paired=True)):
             mod, ctx = _make_module(state)
             self.assertEqual(mod.temp_specs(), [])
-            self.assertEqual([name for name, _label in mod.link_params()], [])
+            self.assertEqual(mod.link_params(), [])
 
     def test_stale_slots_without_link_register_nothing(self):
         """槽位残留但链路未连接：仍然不能登记（概览显示 0 台的场景）。"""
@@ -190,7 +190,7 @@ class MaintainedSpecTests(unittest.TestCase):
         state.slots["c1"] = Slot(slot_id="c1", type="COYOTE_030")
         mod, ctx = _make_module(state)
         self.assertEqual(mod.temp_specs(), [])
-        self.assertEqual([name for name, _label in mod.link_params()], [])
+        self.assertEqual(mod.link_params(), [])
         state.connected = True
         state.paired = True
         self.assertIn("DGLab/Action", {spec["key"] for spec in mod.temp_specs()})
@@ -216,7 +216,7 @@ class MirrorTests(unittest.TestCase):
     def test_received_input_params_mirror_to_path_temps(self):
         state = _state(("c1", "COYOTE_030"))
         written: dict[str, float] = {}
-        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: state, None,
+        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: state,
                            set_temp=lambda k, v: written.__setitem__(k, v))
         try:
             bridge._refresh_input_names(state)
@@ -230,7 +230,7 @@ class MirrorTests(unittest.TestCase):
     def test_unknown_params_not_mirrored(self):
         state = _state(("c1", "COYOTE_030"))
         written: dict[str, float] = {}
-        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: state, None,
+        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: state,
                            set_temp=lambda k, v: written.__setitem__(k, v))
         try:
             bridge._refresh_input_names(state)
@@ -242,7 +242,7 @@ class MirrorTests(unittest.TestCase):
     def test_mirror_never_sent_back(self):
         state = _state(("c1", "COYOTE_030"))
         written: dict[str, float] = {}
-        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: state, None,
+        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: state,
                            set_temp=lambda k, v: written.__setitem__(k, v))
         try:
             sent: list[tuple[str, object]] = []
@@ -259,7 +259,7 @@ class MirrorTests(unittest.TestCase):
         state = _state(("c1", "COYOTE_030"))
         state.slots["c1"].strength = {"A": 55, "B": 0}
         written: dict[str, float] = {}
-        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: state, None,
+        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: state,
                            set_temp=lambda k, v: written.__setitem__(k, v))
         try:
             bridge._refresh_input_names(state)
@@ -274,7 +274,7 @@ class MirrorTests(unittest.TestCase):
 class MaintainedPushTests(unittest.TestCase):
     def _bridge(self, state, written=None):
         written = {} if written is None else written
-        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: state, None,
+        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: state,
                            set_temp=lambda k, v: written.__setitem__(k, v))
         sent: list[tuple[str, object]] = []
         bridge.send_value = lambda addr, value: sent.append((addr, value))
@@ -324,20 +324,22 @@ class MaintainedPushTests(unittest.TestCase):
 
 
 class UserTempRowTests(unittest.TestCase):
+    """表达式行不再求值；只有宿主写进共享变量表的路径变量才会外发。"""
 
-    def test_path_temps_evaluated_and_sent(self):
+    def test_retired_expr_rows_are_inert(self):
         bridge = OscBridge(OscConfig(dict(CONFIG, temps=[
             {"name": _path("DGLabStrengthA"),
              "expr": "{COYOTE.StrengthA} * 2"},
-            {"name": "plain_temp", "expr": "1"}])), lambda: None, None)
-        bridge.apply_config()
+            {"name": "plain_temp", "expr": "1"}])), lambda: None)
+        bridge.engine.attach_temps({})
         try:
             sent: list[tuple[str, object]] = []
             bridge.send_value = lambda addr, value: sent.append((addr, value))
-            bridge.engine.signals["COYOTE.StrengthA"] = 10.5
             bridge._push_values()
-            self.assertIn((_addr("DGLabStrengthA"), 21.0), sent)
-            self.assertNotIn("/plain_temp", [a for a, _v in sent])
+            self.assertEqual(sent, [])
+            bridge.engine.temps[_path("FromEventFlow")] = 4
+            bridge._push_values()
+            self.assertEqual(sent, [(_addr("FromEventFlow"), 4)])
         finally:
             bridge.close()
 
@@ -348,7 +350,7 @@ class LinkParamsTests(unittest.TestCase):
                                        ("b1", "BMTR_1")))
         mod.bridge = OscBridge(
             OscConfig(dict(CONFIG), defaults=OSC_CONFIG_DEFAULTS),
-            ctx.engine.get_state, None)
+            ctx.engine.get_state)
         try:
             rows = {row["name"]: row for row in mod.link_params()}
             self.assertIn(_path("DGLabStrengthA"), rows)
@@ -367,7 +369,7 @@ class LinkParamsTests(unittest.TestCase):
 class NotifyTests(unittest.TestCase):
     def test_bridge_notifies_on_device_sig_change(self):
         seen: list = []
-        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: None, None,
+        bridge = OscBridge(OscConfig(dict(CONFIG)), lambda: None,
                            on_devices_changed=seen.append)
         try:
             bridge._check_devices(_state(("c1", "COYOTE_030")))
@@ -391,17 +393,13 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
         ctx.settings.clear()
         ctx.settings.update(dict(CONFIG, in_port=_free_port()))
 
-        class Commands:
-            async def set_strength(self, ch, v, slot_id=None):
-                pass
-
         class LegacyHost:
             pass
 
         ctx.engine.modules = LegacyHost()
         mod.ctx = ctx
         cfg = OscConfig(dict(ctx.settings), defaults=OSC_CONFIG_DEFAULTS)
-        mod.bridge = OscBridge(cfg, ctx.engine.get_state, Commands(),
+        mod.bridge = OscBridge(cfg, ctx.engine.get_state,
                                events=ctx.events,
                                on_devices_changed=mod._on_devices_changed,
                                set_temp=mod._write_temp)

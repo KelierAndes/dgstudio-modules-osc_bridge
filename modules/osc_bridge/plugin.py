@@ -6,7 +6,7 @@ import re
 META = {
     "id": "osc_bridge",
     "name": "VRChat OSC 联动",
-    "version": "1.16.0",
+    "version": "1.17.0",
     "description": "设备接入即向核心变量表登记全部可读 / 可写参数"
                    "（变量名 = OSC 路径，带可读 / 可写标记，落在变量表可改名栏，"
                    "改名即改收发地址），事件流画布用读数 / 回传卡片直接收发。",
@@ -40,20 +40,7 @@ META = {
             "label": "设备参数前缀", "type": "map",
             "default": {"COYOTE": "DGLab", "OVC": "DGLabOvc", "BMTR": "DGLabBmtr"},
             "group": "settings",
-            "desc": "默认映射行的参数名前缀（仅在映射表为空时用于自动生成）",
-        },
-        "mappings": {
-            "label": "输入映射表", "type": "list", "default": [],
-            "group": "map", "rows": "in",
-            "desc": "行 {param: 核心输入参数, expr: 表达式}，表达式以 {头像参数名} "
-                    "引用动态参数表，可混合核心输出参数，结果取整钳制后派发；"
-                    "留空即同名直传",
-        },
-        "outputs": {
-            "label": "输出映射表", "type": "list", "default": [],
-            "group": "map", "rows": "out",
-            "desc": "行 {param: 核心输出参数, name: 头像参数名, expr: 表达式}，"
-                    "求值后写入 /avatar/parameters/<name>，参数名可自由更改",
+            "desc": "设备头像参数的默认名字前缀（连上第 2 台同家族自动带序号）",
         },
     },
 }
@@ -64,8 +51,7 @@ from dglab.params import core_inputs as _core_inputs
 from dglab.params import output_specs as _output_specs
 from modules.osc_bridge.bridge import (OscBridge, OscConfig,
                                        TEMP_PATH_PREFIX as _TEMP_PATH_PREFIX,
-                                       default_input_name, default_output_name,
-                                       device_osc_names)
+                                       default_input_name, device_osc_names)
 
 OSC_CONFIG_DEFAULTS = spec_defaults(META["config"])
 
@@ -165,10 +151,9 @@ class OscModule(ModuleBase):
         settings["param_names"] = table
         if hasattr(settings, "save"):
             settings.save()
-        _retarget_expr_rows(settings, bare_old, bare_new)
         if self.bridge is not None:
             self.bridge.config["param_names"] = table
-            self.bridge._input_names = None
+            self.bridge.apply_config()
         self.ctx.log(f"OSC 参数改名：{old} → {new}")
         return ""
 
@@ -177,12 +162,7 @@ class OscModule(ModuleBase):
         if "param_names" in ctx.settings and not isinstance(
                 ctx.settings.get("param_names"), dict):
             ctx.settings["param_names"] = {}
-        migrate_legacy(ctx.settings)
-        materialize_names(ctx.settings)
-        _strip_auto_cards(ctx.settings)
-        for stale in ("auto_exposed", "auto_wired", "temps"):
-            if stale in ctx.settings:
-                ctx.settings.pop(stale)
+        drop_retired_rows(ctx.settings, ctx.log)
 
     def on_unload(self) -> None:
         if self.bridge is not None:
@@ -202,7 +182,6 @@ class OscModule(ModuleBase):
         self.bridge = OscBridge(
             cfg,
             self.ctx.engine.get_state,
-            self.ctx.engine,
             events=self.ctx.events,
             on_devices_changed=self._on_devices_changed,
             set_temp=self._write_temp,
@@ -213,8 +192,7 @@ class OscModule(ModuleBase):
     async def reload_config(self) -> None:
         if self.bridge is None:
             return
-        for key in ("mappings", "outputs", "temps", "prefix",
-                    "device_prefixes", "param_names"):
+        for key in ("prefix", "device_prefixes", "param_names"):
             self.bridge.config[key] = self.ctx.settings.get(
                 key, OSC_CONFIG_DEFAULTS.get(key))
         self.bridge.apply_config()
@@ -266,41 +244,28 @@ class OscModule(ModuleBase):
         if set_temp is not None:
             set_temp(str(key), value)
 
-    def _sync_temps(self) -> None:
-        if self.bridge is None:
-            return
-        self.bridge.config["temps"] = [
-            r for r in (self.ctx.settings.get("temps") or [])
-            if isinstance(r, dict)]
-        self.bridge.apply_config()
+def drop_retired_rows(settings, log=None) -> bool:
+    """清掉表达式映射时代的配置行。
 
-    def _reload_logic(self) -> None:
-        host = getattr(self.ctx.engine, "modules", None)
-        reload_fn = getattr(host, "reload", None) if host is not None else None
-        if reload_fn is None:
-            return
-        try:
-            self.ctx.submit(reload_fn(self.id))
-        except Exception as exc:
-            self.ctx.log(f"重载事件流/临时变量失败: {exc!r}")
-
-
-def migrate_legacy(settings) -> bool:
-    changed = False
-    if not _rows(settings.get("mappings")):
-        rows = _legacy_input_rows(settings)
-        if rows:
-            settings["mappings"] = rows
-            changed = True
-    if changed or _has_legacy(settings):
-        for key in ("input_expr", "custom_inputs"):
-            settings.pop(key, None)
-        for spec in _core_inputs():
-            settings.pop(spec["key"], None)
-    if changed:
-        if hasattr(settings, "save"):
-            settings.save()
-    return changed
+    那套 `MappingEngine` 握着核心的 `set_strength` / `fire`，绕过「模块只登记
+    变量、设备动作由事件流写入卡驱动」的拦截，已经整层拆掉；旧设置里留下的
+    `mappings` / `outputs` 行留着也不会再生效，只会让人以为模块里还有映射表。
+    """
+    retired = ("mappings", "outputs", "temps", "events", "input_expr",
+               "custom_inputs", "auto_exposed", "auto_wired")
+    dropped = [key for key in retired if key in settings]
+    per_param = [str(spec["key"]) for spec in _core_inputs()
+                 if str(spec["key"]) in settings]
+    if not dropped and not per_param:
+        return False
+    for key in dropped + per_param:
+        settings.pop(key, None)
+    if hasattr(settings, "save"):
+        settings.save()
+    if log is not None:
+        log("OSC：已清除表达式映射时代的遗留配置行（"
+            + "、".join(dropped + per_param) + "）；换算与设备动作请在事件流里连线")
+    return True
 
 
 def _wired_rows(settings, state) -> dict[str, dict]:
@@ -363,23 +328,6 @@ def _avatar_bare(path, settings) -> str:
     return text.rsplit("/", 1)[-1].strip()
 
 
-def _retarget_expr_rows(settings, old: str, new: str) -> None:
-    """模块自带的表达式映射行里 {旧名} 令牌跟着改名走，别让配置指空变量。"""
-    rows = settings.get("mappings") or []
-    changed = False
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        text = str(row.get("expr") or "")
-        if "{" + old + "}" in text:
-            row["expr"] = text.replace("{" + old + "}", "{" + new + "}")
-            changed = True
-    if changed:
-        settings["mappings"] = rows
-        if hasattr(settings, "save"):
-            settings.save()
-
-
 def _resolved_params(settings, state) -> dict[str, str]:
     """{参数键: 当前头像参数名}——改名要按现有名字找回参数键，登记与收发同源。"""
     out: dict[str, str] = {}
@@ -392,18 +340,6 @@ def _resolved_params(settings, state) -> dict[str, str]:
                        default_input_name(settings, str(spec["key"])))
     out["Action"] = _param_override(settings, "Action") or "Action"
     return out
-
-
-def _strip_auto_cards(settings) -> bool:
-    cards = [r for r in (settings.get("events") or [])
-             if isinstance(r, dict)]
-    kept = [r for r in cards
-            if not (str(r.get("name") or "").startswith("OSC ")
-                    and str(r.get("name") or "").endswith("（自动）"))]
-    if len(kept) != len(cards):
-        settings["events"] = kept
-        return True
-    return False
 
 
 def _has_devices(settings, state) -> bool:
@@ -438,7 +374,8 @@ def _wired_inputs(settings, state) -> list[dict]:
         if spec["family"] and spec["family"] not in families:
             continue
         item = dict(spec)
-        item["name"] = _param_override(settings, item["key"]) or             default_input_name(settings, str(item["key"]))
+        item["name"] = (_param_override(settings, item["key"])
+                          or default_input_name(settings, str(item["key"])))
         out.append(item)
     return out
 
@@ -460,60 +397,3 @@ def _wired_outputs(settings, state) -> list[dict]:
     out.append({"key": "Action", "label": "App 按键反馈",
                 "name": f"{prefix}Action", "type": "Int"})
     return out
-
-
-def materialize_names(settings) -> bool:
-    rows = settings.get("mappings") or []
-    changed = False
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        key = str(row.get("param") or "")
-        if key and not str(row.get("name") or "").strip():
-            row["name"] = default_input_name(settings, key)
-            changed = True
-    if changed:
-        settings["mappings"] = rows
-        if hasattr(settings, "save"):
-            settings.save()
-    return changed
-
-
-def _rows(rows) -> list:
-    return [row for row in (rows or []) if isinstance(row, dict)
-            and str(row.get("param") or "").strip()]
-
-
-def _has_legacy(settings: dict) -> bool:
-    if any(key in settings for key in ("input_expr", "custom_inputs")):
-        return True
-    return any(str(spec["key"]) in settings for spec in _core_inputs())
-
-
-def _legacy_input_rows(settings: dict) -> list[dict]:
-    exprs = {str(k): str(v or "").strip()
-             for k, v in (settings.get("input_expr") or {}).items()}
-    rows: list[dict] = []
-    for spec in _core_inputs():
-        key = spec["key"]
-        text = exprs.get(key) or ""
-        if not text:
-            name = str(settings.get(key) or "").strip()
-            if not name:
-                continue
-            text = "{" + name + "}"
-        rows.append({"param": key, "expr": text})
-    for entry in (settings.get("custom_inputs") or []):
-        if not isinstance(entry, dict):
-            continue
-        target = str(entry.get("target") or "").strip()
-        param = str(entry.get("param") or "").strip()
-        if not target or not param:
-            continue
-        token = "{" + param + "}"
-        row = next((r for r in rows if r["param"] == target), None)
-        if row is None:
-            rows.append({"param": target, "expr": token})
-        elif token not in row["expr"]:
-            row["expr"] = f"max({row['expr']},{token})"
-    return rows

@@ -9,10 +9,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _bootstrap  # noqa: F401  定位 DGStudio 核心仓库
 
-from dglab.official_waveforms_ovc import OvcWaveform
 from dglab.state import EngineState, Slot
-from dglab.waves import CONTINUOUS, PULSE_STREAM, SILENT
-from modules.osc_bridge.bridge import OscBridge, OscConfig, default_input_rows
+from dglab.waves import CONTINUOUS, PULSE_STREAM, SILENT, wave_order
+from modules.osc_bridge.bridge import (OscBridge, OscConfig,
+                                       TEMP_PATH_PREFIX, default_input_name)
 
 
 def free_udp_port() -> int:
@@ -32,165 +32,26 @@ def _state(*slots: tuple[str, str]) -> EngineState:
     return state
 
 
-class OscFamilyInputTests(unittest.IsolatedAsyncioTestCase):
-    async def test_inputs_target_first_device_per_family(self):
-        state = _state(("ovc-1", "OVC_1"), ("coyote-1", "COYOTE_030"),
-                       ("coyote-2", "COYOTE_030"))
+class WaveOrderTests(unittest.TestCase):
+    """波形表顺序是事件流写入卡的依据，模块侧不再自己步进，但顺序不能漂。"""
 
-        calls: list[tuple[str, int, str | None]] = []
-
-        class Commands:
-            async def set_strength(self, ch, v, slot_id=None):
-                calls.append(("set", ch, slot_id))
-
-            async def set_wave(self, ch, name, slot_id=None):
-                calls.append(("wave", ch, slot_id))
-
-            async def zap(self, ch, sec, slot_id=None):
-                calls.append(("zap", ch, slot_id))
-
-            async def emergency_stop(self):
-                calls.append(("stop",))
-
-        port = free_udp_port()
-        cfg = OscConfig({"in_port": port})
-        cfg["mappings"] = default_input_rows(cfg)
-        bridge = OscBridge(cfg, lambda: state, Commands())
-        await bridge.start()
-        try:
-            from pythonosc.udp_client import SimpleUDPClient
-
-            sender = SimpleUDPClient("127.0.0.1", port)
-            sender.send_message("/avatar/parameters/DGLabStrengthA", [42])
-            sender.send_message("/avatar/parameters/DGLabOvcInStrengthA", [77])
-            sender.send_message("/avatar/parameters/DGLabOvcInStrengthB", [3])
-            await asyncio.sleep(0.4)
-        finally:
-            await bridge.stop()
-
-        assert ("set", "A", "coyote-1") in calls, calls
-        assert ("set", "A", "ovc-1") in calls, calls
-        assert ("set", "B", "ovc-1") in calls, calls
-        assert not any(c[2] == "coyote-2" for c in calls), calls
-
-    async def test_wave_direct_and_step_inputs(self):
-        from dglab.waves import wave_order
-
+    def test_wave_order_layout(self):
         order = wave_order("COYOTE")
-        assert order[0] == SILENT and order[1] == CONTINUOUS
-        assert len(order) == 27
-        assert order[-1] == PULSE_STREAM
-        assert wave_order("OVC")[2:-1] == [w.value for w in OvcWaveform]
-        assert wave_order("OVC")[-1] == PULSE_STREAM
+        self.assertEqual(order[0], SILENT)
+        self.assertEqual(order[1], CONTINUOUS)
+        self.assertEqual(len(order), 27)
+        self.assertEqual(order[-1], PULSE_STREAM)
+        from dglab.official_waveforms_ovc import OvcWaveform
 
-        state = _state(("coyote-1", "COYOTE_030"))
-
-        waves: list[tuple[str, str]] = []
-
-        class Commands:
-            _selected_wave = {"A": SILENT, "B": SILENT}
-
-            async def set_strength(self, ch, v, slot_id=None):
-                pass
-
-            async def set_wave(self, ch, name, slot_id=None):
-                waves.append((ch, name))
-                self._selected_wave[ch] = name
-
-            def wave_selection(self):
-                return dict(self._selected_wave)
-
-            async def fire_start(self, slot_id=None, channel=None):
-                pass
-
-            async def fire_stop(self, slot_id=None, channel=None):
-                pass
-
-            async def emergency_stop(self):
-                pass
-
-        port = free_udp_port()
-        cfg = OscConfig({"in_port": port})
-        cfg["mappings"] = default_input_rows(cfg)
-        bridge = OscBridge(cfg, lambda: state, Commands())
-        await bridge.start()
-        try:
-            from pythonosc.udp_client import SimpleUDPClient
-
-            sender = SimpleUDPClient("127.0.0.1", port)
-            sender.send_message("/avatar/parameters/DGLabWaveA", [1])
-            await asyncio.sleep(0.3)
-            sender.send_message("/avatar/parameters/DGLabWaveStepA", [1])
-            await asyncio.sleep(0.3)
-            sender.send_message("/avatar/parameters/DGLabWaveStepA", [-1])
-            await asyncio.sleep(0.3)
-            sender.send_message("/avatar/parameters/DGLabWaveStepA", [0])
-            await asyncio.sleep(0.3)
-        finally:
-            await bridge.stop()
-
-        assert waves[0] == ("A", CONTINUOUS), waves
-        assert waves[1] == ("A", order[2]), waves
-        assert waves[2] == ("A", CONTINUOUS), waves
-        assert len(waves) == 3, waves
-
-    async def test_fire_parameter_is_trigger(self):
-        state = _state(("coyote-1", "COYOTE_030"))
-
-        events: list[str] = []
-
-        class Commands:
-            _selected_wave = {"A": SILENT, "B": SILENT}
-
-            async def set_strength(self, ch, v, slot_id=None):
-                pass
-
-            async def set_wave(self, ch, name, slot_id=None):
-                pass
-
-            async def fire_start(self, slot_id=None, channel=None):
-                events.append(f"start:{slot_id}:{channel}")
-
-            async def fire_stop(self, slot_id=None, channel=None):
-                events.append(f"stop:{slot_id}:{channel}")
-
-            async def emergency_stop(self):
-                pass
-
-        port = free_udp_port()
-        cfg = OscConfig({"in_port": port})
-        cfg["mappings"] = default_input_rows(cfg)
-        bridge = OscBridge(cfg, lambda: state, Commands())
-        await bridge.start()
-        try:
-            from pythonosc.udp_client import SimpleUDPClient
-
-            sender = SimpleUDPClient("127.0.0.1", port)
-            sender.send_message("/avatar/parameters/DGLabFire", [True])
-            await asyncio.sleep(0.3)
-            sender.send_message("/avatar/parameters/DGLabFire", [False])
-            await asyncio.sleep(0.3)
-            sender.send_message("/avatar/parameters/DGLabFireA", [True])
-            await asyncio.sleep(0.3)
-            sender.send_message("/avatar/parameters/DGLabFireA", [False])
-            await asyncio.sleep(0.3)
-        finally:
-            await bridge.stop()
-
-        assert events == ["start:coyote-1:None", "stop:coyote-1:None",
-                          "start:coyote-1:A", "stop:coyote-1:A"], events
+        self.assertEqual(wave_order("OVC")[2:-1], [w.value for w in OvcWaveform])
+        self.assertEqual(wave_order("OVC")[-1], PULSE_STREAM)
 
 
-class OscProbeTests(unittest.IsolatedAsyncioTestCase):
+class OscReceiveTests(unittest.IsolatedAsyncioTestCase):
     async def test_rx_probe_tracks_packets(self):
         state = _state(("coyote-1", "COYOTE_030"))
-
-        class Commands:
-            async def set_strength(self, ch, v, slot_id=None):
-                pass
-
         port = free_udp_port()
-        bridge = OscBridge(OscConfig({"in_port": port}), lambda: state, Commands())
+        bridge = OscBridge(OscConfig({"in_port": port}), lambda: state)
         await bridge.start()
         try:
             from pythonosc.udp_client import SimpleUDPClient
@@ -207,62 +68,103 @@ class OscProbeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await bridge.stop()
 
+    def test_received_value_mirrors_into_named_variable(self):
+        """登记过的头像参数收到即镜像进变量表；没登记的只进动态参数表。"""
+        state = _state(("coyote-1", "COYOTE_030"))
+        written: dict[str, object] = {}
+        bridge = OscBridge(OscConfig(), lambda: state, set_temp=written.__setitem__)
+        bridge._track_input("/avatar/parameters/DGLabStrengthA", 55)
+        bridge._track_input("/avatar/parameters/Whatever", 9)
+        self.assertEqual(
+            written.get(TEMP_PATH_PREFIX + default_input_name(
+                bridge.config, "in_strength_a")), 55)
+        self.assertNotIn(TEMP_PATH_PREFIX + "Whatever", written)
+        self.assertIn("Whatever", bridge.param_names())
+        # 镜像进来的值不再回发，避免头像自己回声
+        self.assertIn(TEMP_PATH_PREFIX + "DGLabStrengthA", bridge._no_send)
 
-class OscMappingRuntimeTests(unittest.TestCase):
+    def test_received_values_surface_as_module_signals(self):
+        """宿主按 `bridge.engine.signals` 取模块读数，接口名与语义都不能动。
 
-    def test_dynamic_input_param_drives_core_dispatch(self):
-        from modules.osc_bridge.bridge import OscBridge, OscConfig
-        from modules.osc_bridge.plugin import OSC_CONFIG_DEFAULTS
+        核心 `flow_host.module_signals()` 取不到时是静默返回空的（被 except 兜住），
+        画布上只会表现为「一直没有数据」，所以这条挂接要有用例钉住。
+        """
+        bridge = OscBridge(OscConfig(), lambda: None)
+        bridge._track_input("/avatar/parameters/blood", 120)
+        bridge._track_input("/avatar/parameters/flag", True)
+        bridge._track_input("/avatar/parameters/text", "abc")
+        self.assertEqual(bridge.engine.signals.get("blood"), 120.0)
+        self.assertEqual(bridge.engine.signals.get("flag"), 1.0)
+        self.assertNotIn("text", bridge.engine.signals)
+        self.assertEqual(bridge.input_values["text"]["value"], "abc")
+        bridge._track_input("/avatar/change")
+        self.assertEqual(bridge.engine.signals, {})
 
-        cfg = OscConfig(
-            {"mappings": [{"param": "in_strength_a", "expr": "{blood}"}]},
-            defaults=OSC_CONFIG_DEFAULTS)
-        bridge = OscBridge(cfg, lambda: None, None)
-        try:
-            bridge._track_input("/avatar/parameters/blood", 120)
-            self.assertIn("blood", bridge.param_names())
-            self.assertEqual(bridge.engine.last_values["in_strength_a"], 120)
-        finally:
-            bridge.close()
+    def test_avatar_change_forces_resend(self):
+        bridge = OscBridge(OscConfig(), lambda: None)
+        bridge.engine.temps[TEMP_PATH_PREFIX + "X"] = 1
+        sent: list[tuple[str, object]] = []
+        bridge.send_value = lambda addr, value: sent.append((addr, value))
+        bridge._push_values()
+        bridge._push_values()
+        self.assertEqual(len(sent), 1)
+        bridge._track_input("/avatar/change")
+        bridge._push_values()
+        self.assertEqual(len(sent), 2)
 
-    def test_output_rows_rename_wins(self):
-        from dglab.state import EngineState, Slot
-        from modules.osc_bridge.bridge import default_output_rows
 
-        state = EngineState(connected=True, paired=True, slots={
-            "1": Slot(slot_id="1", name="Coyote", type="COYOTE",
-                      strength={"A": 80, "B": 0}, battery=66)})
-        cfg = {"prefix": "DGLab", "device_prefixes": {"COYOTE": "DGLab"},
-               "output_map": {"COYOTE.StrengthA": "myStrength",
-                              "Action": "Btn"}}
-        rows = default_output_rows(cfg, state)
-        by = {row["param"]: row for row in rows}
-        self.assertEqual(by["COYOTE.StrengthA"]["name"], "myStrength")
-        self.assertEqual(by["COYOTE.StrengthB"]["name"], "DGLabStrengthB")
-        self.assertEqual(by["COYOTE.Battery"]["name"], "DGLabBattery")
-        self.assertEqual(by["Action"]["name"], "Btn")
+class OscSendTests(unittest.TestCase):
+    """发出去的东西只来自两处：设备读数与宿主写进共享变量表的值。"""
 
-    def test_expression_mixes_device_vars(self):
-        from dglab.state import EngineState, Slot
-        from modules.osc_bridge.bridge import OscBridge, OscConfig
-        from modules.osc_bridge.plugin import OSC_CONFIG_DEFAULTS
+    def test_host_written_variable_is_sent_at_its_own_path(self):
+        bridge = OscBridge(OscConfig(), lambda: None)
+        shared: dict[str, float] = {}
+        bridge.engine.attach_temps(shared)
+        shared[TEMP_PATH_PREFIX + "EventFlowOut"] = 7.5
+        shared["plain_variable"] = 3          # 不带路径的普通变量不发
+        sent: dict[str, object] = {}
+        bridge.send_value = lambda addr, value: sent.__setitem__(addr, value)
+        bridge._push_values()
+        self.assertEqual(sent, {"/" + TEMP_PATH_PREFIX + "EventFlowOut": 7.5})
 
-        state = EngineState(connected=True, paired=True, slots={
-            "1": Slot(slot_id="1", type="COYOTE",
-                      strength={"A": 300, "B": 0},
-                      strength_limit={"A": 200, "B": 200})})
-        cfg = OscConfig(
-            {"mappings": [{"param": "in_strength_a",
-                           "expr": "{Strength-max}*({HP}+{Hurt}/{HPmax})"}]},
-            defaults=OSC_CONFIG_DEFAULTS)
-        bridge = OscBridge(cfg, lambda: state, None)
-        try:
-            bridge.engine.signal("HP", 60)
-            bridge.engine.signal("Hurt", 30)
-            bridge.engine.signal("HPmax", 100)
-            self.assertEqual(bridge.engine.last_values["in_strength_a"], 200)
-        finally:
-            bridge.close()
+    def test_pump_is_a_safe_hook(self):
+        bridge = OscBridge(OscConfig(), lambda: None)
+        bridge.engine.attach_temps({TEMP_PATH_PREFIX + "A": 1})
+        bridge.engine.pump()                  # 宿主 set_temp 后调它，不能抛
+        sent: list = []
+        bridge.send_value = lambda *a: sent.append(a)
+        bridge._push_values()
+        self.assertEqual(sent, [(("/" + TEMP_PATH_PREFIX + "A"), 1)])
+
+    def test_no_command_surface_left(self):
+        """派发层已经拆掉：桥不再握着核心命令，也没有表达式求值的入口。"""
+        bridge = OscBridge(OscConfig(), lambda: None)
+        for name in ("commands", "dispatchers", "input_target_slot",
+                     "_dispatch"):
+            self.assertFalse(hasattr(bridge, name), name)
+        for name in ("set_mappings", "set_outputs", "signal", "out_values",
+                     "last_values", "values"):
+            self.assertFalse(hasattr(bridge.engine, name), name)
+
+
+class OscRealUdpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_stop_round_trip(self):
+        state = _state(("coyote-1", "COYOTE_030"))
+        port = free_udp_port()
+        cfg = OscConfig({"in_port": port, "out_port": free_udp_port(),
+                         "rate_hz": 50})
+        bridge = OscBridge(cfg, lambda: state)
+        await bridge.start()
+        self.assertTrue(bridge._running)
+        from pythonosc.udp_client import SimpleUDPClient
+
+        SimpleUDPClient("127.0.0.1", port).send_message(
+            "/" + TEMP_PATH_PREFIX + "DGLabBattery", [88])
+        await asyncio.sleep(0.3)
+        self.assertEqual(bridge.input_values.get("DGLabBattery", {}).get("value"),
+                         88)
+        await bridge.stop()
+        self.assertFalse(bridge._running)
 
 
 if __name__ == "__main__":

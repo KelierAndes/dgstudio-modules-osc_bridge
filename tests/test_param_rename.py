@@ -20,8 +20,7 @@ import unittest
 from dglab.naming import default_input_name, default_output_name
 from dglab.state import EngineState, Slot
 from modules.osc_bridge.bridge import OscBridge, OscConfig, TEMP_PATH_PREFIX
-from modules.osc_bridge.plugin import (OSC_CONFIG_DEFAULTS, OscModule,
-                                       materialize_names)
+from modules.osc_bridge.plugin import OSC_CONFIG_DEFAULTS, OscModule
 
 CONFIG = {"prefix": "DGLab", "in_port": 19001,
           "device_prefixes": {"COYOTE": "DGLab", "OVC": "DGLabOvc",
@@ -90,7 +89,7 @@ def _make_module(state=None) -> tuple[OscModule, _Ctx]:
 def _attach_bridge(mod: OscModule, ctx: _Ctx) -> OscBridge:
     written: dict[str, object] = {}
     bridge = OscBridge(OscConfig(dict(ctx.settings), defaults=OSC_CONFIG_DEFAULTS),
-                       ctx.engine.get_state, None,
+                       ctx.engine.get_state,
                        set_temp=lambda k, v: written.__setitem__(k, v))
     bridge.log = lambda msg: None
     mod.bridge = bridge
@@ -213,12 +212,13 @@ class RenameVarTests(unittest.TestCase):
         self.assertEqual(default_input_name(ctx.settings, "in_ovc_strength_a"),
                          "MyOvcA")
 
-    def test_rename_input_mapping_expression(self):
+    def test_rename_writes_nothing_into_mapping_rows(self):
+        """改名只落在 param_names：映射表已退役，不该被重新写出来。"""
         mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
-        ctx.settings["mappings"] = [{"param": "in_wave_a",
-                                     "expr": "{DGLabWaveA} * 2"}]
         self.assertEqual(mod.rename_var(_path("DGLabWaveA"), _path("MyWaveA")), "")
-        self.assertEqual(ctx.settings["mappings"][0]["expr"], "{MyWaveA} * 2")
+        self.assertEqual(ctx.settings.get("mappings") or [], [])
+        self.assertEqual(ctx.settings.get("outputs") or [], [])
+        self.assertEqual(ctx.settings["param_names"], {"in_wave_a": "MyWaveA"})
 
     def test_rename_to_same_name_is_noop(self):
         mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
@@ -285,21 +285,23 @@ class OverrideSurvivalTests(unittest.TestCase):
         mod.on_load(ctx)
         self.assertEqual(ctx.settings["param_names"], {})
 
-    def test_materialize_names_uses_override(self):
-        ctx = _Ctx(_state(("c1", "COYOTE_030")))
-        ctx.settings["mappings"] = [{"param": "in_wave_a", "expr": "{MyWaveA}"}]
-        ctx.settings["param_names"] = {"in_wave_a": "MyWaveA"}
-        self.assertTrue(materialize_names(ctx.settings))
-        self.assertEqual(ctx.settings["mappings"][0]["name"], "MyWaveA")
-
-    def test_migrate_legacy_keeps_param_names(self):
-        from modules.osc_bridge.plugin import migrate_legacy
-
+    def test_on_load_drops_retired_rows_but_keeps_names(self):
+        """加载时清掉映射时代的行，改名表与它指向的新名字都留着。"""
+        mod = OscModule()
         ctx = _Ctx(_state(("c1", "COYOTE_030")))
         ctx.settings["param_names"] = {"in_wave_a": "MyWaveA"}
+        ctx.settings["mappings"] = [{"param": "in_wave_a",
+                                     "expr": "{DGLabWaveA} * 2"}]
+        ctx.settings["outputs"] = [{"param": "COYOTE.StrengthA",
+                                    "name": "Old", "expr": "{X}"}]
         ctx.settings["input_expr"] = {"in_wave_a": "{DGLabWaveA}"}
-        self.assertTrue(migrate_legacy(ctx.settings))
+        mod.on_load(ctx)
         self.assertEqual(ctx.settings["param_names"], {"in_wave_a": "MyWaveA"})
+        for key in ("mappings", "outputs", "input_expr"):
+            self.assertNotIn(key, ctx.settings)
+        keys = {row["key"] for row in mod.temp_specs()}
+        self.assertIn(_path("MyWaveA"), keys)
+        self.assertNotIn(_path("DGLabWaveA"), keys)
 
 
 if __name__ == "__main__":

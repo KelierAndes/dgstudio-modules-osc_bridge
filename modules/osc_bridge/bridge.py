@@ -1,9 +1,15 @@
+"""OSC 收发桥：把设备读数登记成变量，把宿主写入的变量按同名地址回传头像。
+
+本模块是纯输入设备：收进来的值镜像进共享变量表，事件流的写入卡片把数值写进
+同名变量，桥再按变量名当 OSC 地址发出去。表达式求值与设备派发已经退役（那套
+`MappingEngine` 直接握着核心的 `set_strength` / `fire`，绕过「模块不得直写设备」
+的拦截），要换算或驱动设备请在事件流里连线。
+"""
 
 from __future__ import annotations
 
 import asyncio
 import copy
-import re
 import socket
 import threading
 import time
@@ -13,20 +19,13 @@ from pythonosc.dispatcher import Dispatcher
 from pythonosc.osc_message_builder import OscMessageBuilder
 from pythonosc.udp_client import SimpleUDPClient
 
-from dglab import expr
-from dglab.mapping import MappingEngine, signal_specs
-from dglab.naming import (INPUT_NAME_TEMPLATES, default_input_name,
-                          default_output_name, device_osc_names)
-from dglab.params import (build_dispatchers, core_alias_values, core_inputs,
-                          device_state_values, input_ranges, output_key,
-                          output_spec, output_specs)
-from dglab.state import EngineState, family_of
+from dglab.mapping import as_number
+from dglab.naming import default_input_name, device_osc_names
+from dglab.params import core_inputs, device_state_values, output_specs
 from dglab.waves import wave_order
 
-__all__ = ["OscBridge", "OscConfig", "device_osc_names", "wave_order",
-           "output_map_key", "signal_specs", "OUT_SIGNALS",
-           "default_input_rows", "default_output_rows", "effective_rows",
-           "default_input_name", "default_output_name", "TEMP_PATH_PREFIX",
+__all__ = ["OscBridge", "OscConfig", "OscValueSpace", "device_osc_names",
+           "wave_order", "default_input_name", "TEMP_PATH_PREFIX",
            "param_name_override"]
 
 TEMP_PATH_PREFIX = "avatar/parameters/"
@@ -67,8 +66,6 @@ class OscConfig(dict):
             "OVC": "DGLabOvc",
             "BMTR": "DGLabBmtr",
         },
-        "mappings": [],
-        "outputs": [],
     }
 
     def __init__(self, data: dict | None = None, defaults: dict | None = None):
@@ -77,12 +74,51 @@ class OscConfig(dict):
             self.update({k: v for k, v in data.items() if v is not None})
 
 
+class OscValueSpace:
+    """核心的共享值空间在桥这边的挂接点（宿主按 `bridge.engine` 找它）。
+
+    - `signals`：收到的头像参数值。事件流的读数卡与变量表实时值都从这里取
+      （`flow_host.module_signals`），所以收包必须写它，不能只留时间戳。
+    - `temps`：核心的共享变量表，由宿主 `attach_temps` 接进来；事件流的写入卡片
+      往这里写，桥按变量名当 OSC 地址发出去。
+    - `pump()`：宿主写完一个值后调它。这里不再求值也不派发，发什么由 `_push_loop`
+      每拍读，所以它只是让下一拍尽早跟上。
+    """
+
+    def __init__(self):
+        self.signals: dict[str, float] = {}
+        self.temps: dict[str, Any] = {}
+
+    def attach_temps(self, shared: dict) -> None:
+        if shared is self.temps:
+            return
+        self.temps = shared
+
+    def reset(self) -> None:
+        self.signals.clear()
+
+    def pump(self) -> None:
+        return None
+
+
+def _device_sig(state, prefixes: dict) -> tuple:
+    """设备指纹：只有连上的设备集合变了才重新登记参数。"""
+    if state is None:
+        return ()
+    try:
+        names = device_osc_names(state, prefixes)
+    except Exception:
+        return ()
+    return tuple((sid, info["family"], info["index"], info["name"])
+                 for sid, info in sorted(names.items()))
+
+
 class OscBridge:
-    def __init__(self, config: OscConfig, get_state, commands, events=None,
+
+    def __init__(self, config: OscConfig, get_state, *, events=None,
                  on_devices_changed=None, set_temp=None):
         self.config = config
         self.get_state = get_state
-        self.commands = commands
         self._on_devices_changed = on_devices_changed
         self._set_temp = set_temp
 
@@ -107,14 +143,8 @@ class OscBridge:
         self._events = events
         if events is not None:
             events.on("action", self._on_event_action)
-        self.engine = MappingEngine(self._dispatch,
-                                    device_vars=self._device_vars,
-                                    ranges=input_ranges())
-        self._temp_rows: list[dict] = []
-        self._api = self._DeviceApi(self)
-        self.dispatchers = build_dispatchers(self._api, core_inputs())
+        self.engine = OscValueSpace()
         self._auto_sig: tuple | None = None
-        self._primed = False
         self._dispatcher.set_default_handler(self._track_input)
         self.apply_config()
 
@@ -124,35 +154,8 @@ class OscBridge:
             self._events = None
 
     def apply_config(self) -> None:
-        rows_in, rows_out = effective_rows(self.config, self._safe_state())
-        self._temp_rows = self._path_temp_rows()
-        first = not self._primed
-        if first:
-            self.engine.armed = False
-        self.engine.set_mappings(rows_in)
-        self.engine.set_outputs(rows_out)
-        if first:
-            self.engine.armed = True
-            self._primed = True
-
-    def _path_temp_rows(self) -> list[dict]:
-        rows: list[dict] = []
-        seen: set[str] = set()
-        for row in (self.config.get("temps") or []):
-            if not isinstance(row, dict):
-                continue
-            name = str(row.get("name") or "").strip()
-            if "/" not in name or name in seen:
-                continue
-            try:
-                text = expr.normalize(row.get("expr") or "")
-            except expr.ExprError:
-                continue
-            if not text:
-                continue
-            seen.add(name)
-            rows.append({"name": name, "expr": text})
-        return rows
+        """改名与前缀即时生效：地址每拍现算，这里只刷新收包侧的名字集合。"""
+        self._refresh_input_names(self._safe_state())
 
     def _safe_state(self):
         try:
@@ -178,6 +181,7 @@ class OscBridge:
         self.last_rx = time.monotonic()
         self.rx_count += 1
         if str(addr) == "/avatar/change":
+            # 换头像：旧参数名不再有效，读数一并清掉，别留着给卡片当现值
             self._last_sent.clear()
             self.engine.reset()
             return
@@ -185,7 +189,9 @@ class OscBridge:
             return
         name = str(addr).rstrip("/").rsplit("/", 1)[-1]
         self.input_values[name] = {"value": args[0], "ts": time.monotonic()}
-        self.engine.signal(name, args[0])
+        num = as_number(args[0])
+        if num is not None:
+            self.engine.signals[name] = num
         self._mirror_input(name, args[0])
 
     def _mirror_input(self, name: str, value) -> None:
@@ -218,76 +224,6 @@ class OscBridge:
                 continue
             rows.append({"param": name, "value": rec.get("value"), "age": age})
         return sorted(rows, key=lambda r: r["param"])
-
-    def _dispatch(self, target: str, value: int) -> None:
-        runner = self.dispatchers.get(target)
-        if runner is None:
-            return
-        try:
-            runner(value)
-        except Exception as exc:
-            self.log(f"[OSC] 映射派发 {target}={value} 失败: {exc!r}")
-
-    class _DeviceApi:
-
-        def __init__(self, bridge: "OscBridge"):
-            self._b = bridge
-
-        @property
-        def _cmd(self):
-            return self._b.commands
-
-        def resolve_slot(self, family: str = "") -> str | None:
-            return self._b.input_target_slot(family or "COYOTE")
-
-        def wave_order(self, family: str = "") -> list[str]:
-            return wave_order(family or "COYOTE")
-
-        def wave_selection(self) -> dict:
-            getter = getattr(self._cmd, "wave_selection", None)
-            return (getter() or {}) if getter is not None else {}
-
-        def set_strength(self, channel, value, slot_id=None):
-            return self._cmd.set_strength(channel, value, slot_id=slot_id)
-
-        def set_wave(self, channel, name, slot_id=None):
-            return self._cmd.set_wave(channel, name, slot_id=slot_id)
-
-        def zap(self, channel, seconds=1.0, slot_id=None):
-            return self._cmd.zap(channel, seconds, slot_id=slot_id)
-
-        def fire_start(self, slot_id=None, channel=None):
-            return self._cmd.fire_start(slot_id=slot_id, channel=channel)
-
-        def fire_stop(self, slot_id=None, channel=None):
-            return self._cmd.fire_stop(slot_id=slot_id, channel=channel)
-
-        def emergency_stop(self):
-            return self._cmd.emergency_stop()
-
-        def run(self, coro) -> None:
-            self._b._spawn(coro)
-
-    def _device_vars(self) -> dict[str, float]:
-        vals = device_state_values(self._safe_state())
-        vals.update(core_alias_values(vals))
-        vals["Action"] = float(self._action_value
-                               if time.monotonic() < self._action_until else 0)
-        return vals
-
-    def _spawn(self, coro) -> None:
-        loop = self._loop
-        if loop is None or loop.is_closed():
-            coro.close()
-            return
-        try:
-            running = asyncio.get_running_loop()
-        except RuntimeError:
-            running = None
-        if running is loop:
-            loop.create_task(coro)
-        else:
-            asyncio.run_coroutine_threadsafe(coro, loop)
 
     @staticmethod
     def _local_ip() -> str:
@@ -350,7 +286,6 @@ class OscBridge:
                 await asyncio.sleep(interval)
                 state = self._safe_state()
                 self._check_devices(state)
-                self.engine.pump()
                 self._push_maintained(state)
                 self._push_values()
                 tick += 1
@@ -440,158 +375,18 @@ class OscBridge:
                 writer(name, value)
             except Exception as exc:
                 self.log(f"[OSC] 临时变量写入 {name} 失败: {exc!r}")
-        if self._last_sent.get(name) != value:
-            self.send_value(f"/{name.lstrip('/')}", value)
-            self._last_sent[name] = value
+        self._send_if_changed(name, value)
 
     def _push_values(self) -> None:
-        for name, value in self.engine.out_values.items():
-            if self._last_sent.get(name) != value:
-                self._send_param(name, value)
-                self._last_sent[name] = value
-        self._push_temps()
-
-    def _push_temps(self) -> None:
-        for row in self._temp_rows:
-            name = row["name"]
-            if name in self._no_send:
+        """事件流写进共享变量表的路径变量，按变量名当地址发出去。"""
+        for name in sorted(self.engine.temps):
+            key = str(name)
+            if "/" not in key or key in self._no_send:
                 continue
-            try:
-                raw = expr.evaluate(row["expr"], self.engine.values())
-            except expr.ExprError:
-                continue
-            except Exception:
-                continue
-            value = self._typed_temp(row, raw)
-            if self._last_sent.get(name) != value:
-                self.send_value(f"/{name.lstrip('/')}", value)
-                self._last_sent[name] = value
-        for key, value in list(self.engine.temps.items()):
-            key = str(key)
-            if "/" not in key or key in self._no_send \
-                    or any(r["name"] == key for r in self._temp_rows):
-                continue
-            if self._last_sent.get(key) != value:
-                self.send_value(f"/{key.lstrip('/')}", value)
-                self._last_sent[key] = value
+            self._send_if_changed(key, self.engine.temps[key])
 
-    _BARE_EXPR = re.compile(r"^\{([^{}]+)\}$")
-
-    def _typed_temp(self, row: dict, value):
-        m = self._BARE_EXPR.match(str(row.get("expr") or ""))
-        kind = ""
-        if m:
-            spec = output_spec(m.group(1).strip())
-            if spec is not None:
-                kind = str(spec.get("type") or "")
-        kind = kind.upper()
-        try:
-            if kind == "INT":
-                return int(round(float(value)))
-            if kind == "BOOL":
-                return bool(float(value) > 1e-9)
-            if kind == "FLOAT":
-                return round(float(value), 3)
-        except (TypeError, ValueError):
-            pass
-        return value
-
-    def _send_param(self, name: str, value) -> None:
-        self.send_value(f"/avatar/parameters/{name}", value)
-
-    def _device_names(self, state: EngineState) -> dict[str, dict[str, str]]:
-        return device_osc_names(state, self.config["device_prefixes"])
-
-    def input_target_slot(self, family: str = "COYOTE") -> str | None:
-        state = self._safe_state()
-        if state is None:
-            return None
-        slots = {sid: state.slots[sid] for sid in sorted(state.slots)}
-        for sid, slot in slots.items():
-            if family_of(slot.type) == family:
-                return sid
-        for sid, slot in slots.items():
-            if family == "BMTR" or family_of(slot.type) != "BMTR":
-                return sid
-        return None
-
-
-def _device_sig(state, prefixes: dict) -> tuple:
-    if state is None:
-        return ()
-    try:
-        names = device_osc_names(state, prefixes)
-    except Exception:
-        return ()
-    return tuple((sid, info["family"], info["index"], info["name"])
-                 for sid, info in sorted(names.items()))
-
-
-def default_input_rows(config: dict, state=None) -> list[dict]:
-    prefixes = dict(config.get("device_prefixes") or {})
-    global_prefix = str(config.get("prefix") or "DGLab")
-    if state is None:
-        families = None
-    else:
-        try:
-            names = device_osc_names(state, prefixes)
-        except Exception:
-            names = {}
-        families = {info["family"] for info in names.values()}
-    rows: list[dict] = []
-    for spec in core_inputs():
-        if families is not None and spec["family"] \
-                and spec["family"] not in families:
-            continue
-        if spec["action"] == "emergency":
-            name = f"{global_prefix}Emergency"
-        else:
-            prefix = str(prefixes.get(spec["family"]) or
-                         f"DGLab{spec['family'].capitalize()}")
-            templates = INPUT_NAME_TEMPLATES.get(spec["family"], ())
-            index = {"strength": 0, "wave": 1, "wave_step": 2, "zap": 3,
-                     "fire": 4}.get(spec["action"])
-            if index is None or index >= len(templates):
-                continue
-            name = templates[index].format(prefix=prefix, ch=spec["channel"])
-        rows.append({"param": spec["key"], "expr": "{" + name + "}"})
-    return rows
-
-
-def default_output_rows(config: dict, state) -> list[dict]:
-    read = config.get("output_map") or {}
-    names = device_osc_names(state, config.get("device_prefixes") or {}) \
-        if state is not None else {}
-    rows: list[dict] = []
-    for sid in sorted(names):
-        info = names[sid]
-        index = int(info.get("index", 1))
-        for spec in output_specs(info["family"], index):
-            key = spec["key"]
-            custom = str(read.get(key) or "").strip()
-            rows.append({"param": key,
-                         "name": custom or f"{info['name']}{spec['signal']}",
-                         "expr": "{" + key + "}",
-                         "type": spec["type"]})
-    prefix = str(config.get("prefix") or "DGLab")
-    rows.append({"param": "Action",
-                 "name": str(read.get("Action") or "").strip()
-                 or f"{prefix}Action",
-                 "expr": "{Action}", "type": "Int"})
-    return rows
-
-
-def effective_rows(config: dict, state=None) -> tuple[list, list]:
-    return _valid(config.get("mappings") or []), _valid(config.get("outputs") or [])
-
-
-def _valid(rows: list) -> list[dict]:
-    return [row for row in (rows or []) if isinstance(row, dict)
-            and str(row.get("param") or "").strip()]
-
-
-from dglab.params import OUTPUT_SIGNALS as OUT_SIGNALS    # noqa: E402
-
-
-def output_map_key(family: str, index: int, signal: str) -> str:
-    return output_key(family, index, signal)
+    def _send_if_changed(self, name: str, value) -> None:
+        if self._last_sent.get(name) == value:
+            return
+        self.send_value(f"/{str(name).lstrip('/')}", value)
+        self._last_sent[name] = value
