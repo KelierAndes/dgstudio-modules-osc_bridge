@@ -1,0 +1,1032 @@
+{
+  "version": 3,
+  "name": "VRChatOSC",
+  "saved_at": "2026-10-11 01:41:15",
+  "graphs": {
+    "input": {
+      "page": "input",
+      "nodes": [
+        {
+          "id": "i83",
+          "def": "mod.period",
+          "x": 660.5146484375,
+          "y": 40.0,
+          "params": {
+            "period_ms": 50,
+            "var": ""
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i85",
+          "def": "mod.read.osc_bridge.avatar/parameters/DGLabStrengthA",
+          "x": 297.51953125,
+          "y": 40.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabStrengthA"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i86",
+          "def": "mod.read.osc_bridge.avatar/parameters/DGLabStrengthB",
+          "x": 297.51953125,
+          "y": 117.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabStrengthB"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i87",
+          "def": "core.write.in_strength_a",
+          "x": 40.0,
+          "y": 40.0,
+          "params": {
+            "key": "in_strength_a"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i88",
+          "def": "core.write.in_strength_b",
+          "x": 40.0,
+          "y": 117.0,
+          "params": {
+            "key": "in_strength_b"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i89",
+          "def": "core.write.in_ovc_strength_a",
+          "x": 40.0,
+          "y": 194.0,
+          "params": {
+            "key": "in_ovc_strength_a"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i90",
+          "def": "core.write.in_ovc_strength_b",
+          "x": 40.0,
+          "y": 271.0,
+          "params": {
+            "key": "in_ovc_strength_b"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i91",
+          "def": "core.write.in_ovc_fire_a",
+          "x": 40.0,
+          "y": 810.0,
+          "params": {
+            "key": "in_ovc_fire_a"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i92",
+          "def": "core.write.in_ovc_fire_b",
+          "x": 40.0,
+          "y": 887.0,
+          "params": {
+            "key": "in_ovc_fire_b"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i93",
+          "def": "core.write.in_fire_a",
+          "x": 40.0,
+          "y": 656.0,
+          "params": {
+            "key": "in_fire_a"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i94",
+          "def": "core.write.in_fire_b",
+          "x": 40.0,
+          "y": 733.0,
+          "params": {
+            "key": "in_fire_b"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i95",
+          "def": "core.write.in_ovc_wave_a",
+          "x": 40.0,
+          "y": 502.0,
+          "params": {
+            "key": "in_ovc_wave_a"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i96",
+          "def": "core.write.in_ovc_wave_b",
+          "x": 40.0,
+          "y": 579.0,
+          "params": {
+            "key": "in_ovc_wave_b"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i97",
+          "def": "core.write.in_wave_a",
+          "x": 40.0,
+          "y": 348.0,
+          "params": {
+            "key": "in_wave_a"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i98",
+          "def": "core.write.in_wave_b",
+          "x": 40.0,
+          "y": 425.0,
+          "params": {
+            "key": "in_wave_b"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i111",
+          "def": "mod.read.osc_bridge.avatar/parameters/DGLabOvcInStrengthA",
+          "x": 297.51953125,
+          "y": 194.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabOvcInStrengthA"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i112",
+          "def": "mod.read.osc_bridge.avatar/parameters/DGLabOvcInStrengthB",
+          "x": 297.51953125,
+          "y": 271.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabOvcInStrengthB"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i113",
+          "def": "mod.read.osc_bridge.avatar/parameters/DGLabWaveA",
+          "x": 297.51953125,
+          "y": 348.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabWaveA"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i114",
+          "def": "mod.read.osc_bridge.avatar/parameters/DGLabWaveB",
+          "x": 297.51953125,
+          "y": 425.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabWaveB"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i115",
+          "def": "mod.read.osc_bridge.avatar/parameters/DGLabOvcInWaveA",
+          "x": 297.51953125,
+          "y": 502.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabOvcInWaveA"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i116",
+          "def": "mod.read.osc_bridge.avatar/parameters/DGLabOvcInWaveB",
+          "x": 297.51953125,
+          "y": 579.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabOvcInWaveB"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i117",
+          "def": "mod.read.osc_bridge.avatar/parameters/DGLabFireA",
+          "x": 297.51953125,
+          "y": 656.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabFireA"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i118",
+          "def": "mod.read.osc_bridge.avatar/parameters/DGLabFireB",
+          "x": 297.51953125,
+          "y": 733.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabFireB"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i119",
+          "def": "mod.read.osc_bridge.avatar/parameters/DGLabOvcInFireA",
+          "x": 297.51953125,
+          "y": 810.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabOvcInFireA"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i120",
+          "def": "mod.read.osc_bridge.avatar/parameters/DGLabOvcInFireB",
+          "x": 297.51953125,
+          "y": 887.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabOvcInFireB"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i133",
+          "def": "mod.read.osc_bridge.avatar/parameters/DGLabEmergency",
+          "x": 297.51953125,
+          "y": 964.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabEmergency"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "i134",
+          "def": "core.write.in_emergency",
+          "x": 40.0,
+          "y": 964.0,
+          "params": {
+            "key": "in_emergency"
+          },
+          "alias": "",
+          "overrides": {}
+        }
+      ],
+      "wires": [
+        {
+          "id": "iw99",
+          "src": [
+            "i83",
+            0
+          ],
+          "dst": [
+            "i89",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "iw100",
+          "src": [
+            "i83",
+            0
+          ],
+          "dst": [
+            "i87",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "iw101",
+          "src": [
+            "i83",
+            0
+          ],
+          "dst": [
+            "i90",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "iw102",
+          "src": [
+            "i83",
+            0
+          ],
+          "dst": [
+            "i91",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "iw103",
+          "src": [
+            "i83",
+            0
+          ],
+          "dst": [
+            "i88",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "iw104",
+          "src": [
+            "i83",
+            0
+          ],
+          "dst": [
+            "i93",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "iw105",
+          "src": [
+            "i83",
+            0
+          ],
+          "dst": [
+            "i95",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "iw106",
+          "src": [
+            "i83",
+            0
+          ],
+          "dst": [
+            "i94",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "iw107",
+          "src": [
+            "i83",
+            0
+          ],
+          "dst": [
+            "i92",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "iw108",
+          "src": [
+            "i83",
+            0
+          ],
+          "dst": [
+            "i98",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "iw109",
+          "src": [
+            "i83",
+            0
+          ],
+          "dst": [
+            "i97",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "iw110",
+          "src": [
+            "i83",
+            0
+          ],
+          "dst": [
+            "i96",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "iw121",
+          "src": [
+            "i111",
+            0
+          ],
+          "dst": [
+            "i89",
+            0
+          ],
+          "type": "int"
+        },
+        {
+          "id": "iw122",
+          "src": [
+            "i85",
+            0
+          ],
+          "dst": [
+            "i87",
+            0
+          ],
+          "type": "int"
+        },
+        {
+          "id": "iw123",
+          "src": [
+            "i112",
+            0
+          ],
+          "dst": [
+            "i90",
+            0
+          ],
+          "type": "int"
+        },
+        {
+          "id": "iw124",
+          "src": [
+            "i86",
+            0
+          ],
+          "dst": [
+            "i88",
+            0
+          ],
+          "type": "int"
+        },
+        {
+          "id": "iw125",
+          "src": [
+            "i113",
+            0
+          ],
+          "dst": [
+            "i97",
+            0
+          ],
+          "type": "int"
+        },
+        {
+          "id": "iw126",
+          "src": [
+            "i114",
+            0
+          ],
+          "dst": [
+            "i98",
+            0
+          ],
+          "type": "int"
+        },
+        {
+          "id": "iw127",
+          "src": [
+            "i115",
+            0
+          ],
+          "dst": [
+            "i95",
+            0
+          ],
+          "type": "int"
+        },
+        {
+          "id": "iw128",
+          "src": [
+            "i116",
+            0
+          ],
+          "dst": [
+            "i96",
+            0
+          ],
+          "type": "int"
+        },
+        {
+          "id": "iw129",
+          "src": [
+            "i117",
+            0
+          ],
+          "dst": [
+            "i93",
+            0
+          ],
+          "type": "bool"
+        },
+        {
+          "id": "iw130",
+          "src": [
+            "i118",
+            0
+          ],
+          "dst": [
+            "i94",
+            0
+          ],
+          "type": "bool"
+        },
+        {
+          "id": "iw131",
+          "src": [
+            "i119",
+            0
+          ],
+          "dst": [
+            "i91",
+            0
+          ],
+          "type": "bool"
+        },
+        {
+          "id": "iw132",
+          "src": [
+            "i120",
+            0
+          ],
+          "dst": [
+            "i92",
+            0
+          ],
+          "type": "bool"
+        },
+        {
+          "id": "iw135",
+          "src": [
+            "i133",
+            0
+          ],
+          "dst": [
+            "i134",
+            0
+          ],
+          "type": "bool"
+        },
+        {
+          "id": "iw136",
+          "src": [
+            "i83",
+            0
+          ],
+          "dst": [
+            "i134",
+            -1
+          ],
+          "type": "exec"
+        }
+      ]
+    },
+    "output": {
+      "page": "output",
+      "nodes": [
+        {
+          "id": "o10",
+          "def": "mod.period",
+          "x": 40.0,
+          "y": 40.0,
+          "params": {
+            "period_ms": 50,
+            "var": ""
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "o11",
+          "def": "mod.write.osc_bridge.avatar/parameters/DGLabBattery",
+          "x": 465.51953125,
+          "y": 40.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabBattery"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "o12",
+          "def": "mod.write.osc_bridge.avatar/parameters/DGLabOvcBattery",
+          "x": 465.51953125,
+          "y": 117.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabOvcBattery"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "o13",
+          "def": "mod.write.osc_bridge.avatar/parameters/DGLabBmtrBattery",
+          "x": 465.51953125,
+          "y": 194.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabBmtrBattery"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "o14",
+          "def": "mod.write.osc_bridge.avatar/parameters/DGLabLimitA",
+          "x": 465.51953125,
+          "y": 271.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabLimitA"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "o15",
+          "def": "mod.write.osc_bridge.avatar/parameters/DGLabLimitB",
+          "x": 465.51953125,
+          "y": 348.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabLimitB"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "o16",
+          "def": "mod.write.osc_bridge.avatar/parameters/DGLabOvcLimitA",
+          "x": 465.51953125,
+          "y": 425.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabOvcLimitA"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "o17",
+          "def": "mod.write.osc_bridge.avatar/parameters/DGLabOvcLimitB",
+          "x": 465.51953125,
+          "y": 502.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabOvcLimitB"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "o18",
+          "def": "mod.write.osc_bridge.avatar/parameters/DGLabBmtrPressure",
+          "x": 465.51953125,
+          "y": 579.0,
+          "params": {
+            "module": "osc_bridge",
+            "name": "avatar/parameters/DGLabBmtrPressure"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "o19",
+          "def": "core.read.COYOTE.Battery",
+          "x": 222.0,
+          "y": 40.0,
+          "params": {
+            "key": "COYOTE.Battery"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "o20",
+          "def": "core.read.OVC.Battery",
+          "x": 222.0,
+          "y": 117.0,
+          "params": {
+            "key": "OVC.Battery"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "o21",
+          "def": "core.read.BMTR.Battery",
+          "x": 222.0,
+          "y": 194.0,
+          "params": {
+            "key": "BMTR.Battery"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "o22",
+          "def": "core.read.COYOTE.LimitA",
+          "x": 222.0,
+          "y": 271.0,
+          "params": {
+            "key": "COYOTE.LimitA"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "o23",
+          "def": "core.read.COYOTE.LimitB",
+          "x": 222.0,
+          "y": 348.0,
+          "params": {
+            "key": "COYOTE.LimitB"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "o24",
+          "def": "core.read.OVC.LimitA",
+          "x": 222.0,
+          "y": 425.0,
+          "params": {
+            "key": "OVC.LimitA"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "o25",
+          "def": "core.read.OVC.LimitB",
+          "x": 222.0,
+          "y": 502.0,
+          "params": {
+            "key": "OVC.LimitB"
+          },
+          "alias": "",
+          "overrides": {}
+        },
+        {
+          "id": "o26",
+          "def": "core.read.BMTR.Pressure",
+          "x": 222.0,
+          "y": 579.0,
+          "params": {
+            "key": "BMTR.Pressure"
+          },
+          "alias": "",
+          "overrides": {}
+        }
+      ],
+      "wires": [
+        {
+          "id": "ow27",
+          "src": [
+            "o10",
+            0
+          ],
+          "dst": [
+            "o11",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "ow28",
+          "src": [
+            "o10",
+            0
+          ],
+          "dst": [
+            "o12",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "ow29",
+          "src": [
+            "o10",
+            0
+          ],
+          "dst": [
+            "o13",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "ow30",
+          "src": [
+            "o10",
+            0
+          ],
+          "dst": [
+            "o14",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "ow31",
+          "src": [
+            "o10",
+            0
+          ],
+          "dst": [
+            "o15",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "ow32",
+          "src": [
+            "o10",
+            0
+          ],
+          "dst": [
+            "o16",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "ow33",
+          "src": [
+            "o10",
+            0
+          ],
+          "dst": [
+            "o17",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "ow34",
+          "src": [
+            "o10",
+            0
+          ],
+          "dst": [
+            "o18",
+            -1
+          ],
+          "type": "exec"
+        },
+        {
+          "id": "ow35",
+          "src": [
+            "o19",
+            0
+          ],
+          "dst": [
+            "o11",
+            0
+          ],
+          "type": "int"
+        },
+        {
+          "id": "ow36",
+          "src": [
+            "o20",
+            0
+          ],
+          "dst": [
+            "o12",
+            0
+          ],
+          "type": "int"
+        },
+        {
+          "id": "ow37",
+          "src": [
+            "o21",
+            0
+          ],
+          "dst": [
+            "o13",
+            0
+          ],
+          "type": "int"
+        },
+        {
+          "id": "ow38",
+          "src": [
+            "o22",
+            0
+          ],
+          "dst": [
+            "o14",
+            0
+          ],
+          "type": "int"
+        },
+        {
+          "id": "ow39",
+          "src": [
+            "o23",
+            0
+          ],
+          "dst": [
+            "o15",
+            0
+          ],
+          "type": "int"
+        },
+        {
+          "id": "ow40",
+          "src": [
+            "o24",
+            0
+          ],
+          "dst": [
+            "o16",
+            0
+          ],
+          "type": "int"
+        },
+        {
+          "id": "ow41",
+          "src": [
+            "o25",
+            0
+          ],
+          "dst": [
+            "o17",
+            0
+          ],
+          "type": "int"
+        },
+        {
+          "id": "ow42",
+          "src": [
+            "o26",
+            0
+          ],
+          "dst": [
+            "o18",
+            0
+          ],
+          "type": "float"
+        }
+      ]
+    }
+  }
+}
