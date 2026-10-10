@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _bootstrap  # noqa: F401  定位 DGStudio 核心仓库
@@ -144,16 +145,16 @@ class MaintainedSpecTests(unittest.TestCase):
         self.assertIn(_path("DGLabEmergency"), specs)
         self.assertFalse(any("负鼠" in str(spec["label"])
                              for spec in specs.values()))
-        # 方向按参数语义：能驱动下去的核心输入参数可写，设备回传读数只读
+        # 方向按数据流：头像发入的控制参数可读，核心读数回传头像可写
         self.assertEqual(specs[_path("DGLabStrengthA")]["dir"], "inout")
-        self.assertEqual(specs[_path("DGLabBmtrPressure")]["dir"], "in")
-        self.assertEqual(specs[_path("DGLabEmergency")]["dir"], "out")
-        # 全局前缀参数（DGLab/Action）是 App 按键反馈：宿主只读
-        self.assertEqual(specs["DGLab/Action"]["dir"], "in")
+        self.assertEqual(specs[_path("DGLabBmtrPressure")]["dir"], "out")
+        self.assertEqual(specs[_path("DGLabEmergency")]["dir"], "in")
+        # 全局前缀参数（DGLab/Action）是 App 按键反馈：发给头像，宿主可写
+        self.assertEqual(specs["DGLab/Action"]["dir"], "out")
         for key, spec in specs.items():
             if any(tail in key for tail in ("Battery", "Connected", "ChannelOK",
                                             "Limit", "Pressure", "EdgeState")):
-                self.assertEqual(spec["dir"], "in", key)
+                self.assertEqual(spec["dir"], "out", key)
 
     def test_registration_leaves_config_alone(self):
         """登记只由模块实时算出：不再往配置文件写 temps 行。"""
@@ -357,13 +358,37 @@ class LinkParamsTests(unittest.TestCase):
             self.assertIn(_path("DGLabBmtrPressure"), rows)
             self.assertIn(_path("DGLabEmergency"), rows)
             self.assertIn("DGLab/Action", rows)
-            # 全部是可改名行；方向按语义：设备回传读数可读、控制量可写
+            # 全部是可改名行；方向按数据流：设备读数可写、控制量可读
             self.assertTrue(all(row["renamable"] for row in rows.values()))
-            self.assertEqual(rows[_path("DGLabBmtrPressure")]["dir"], "in")
-            self.assertEqual(rows[_path("DGLabEmergency")]["dir"], "out")
-            self.assertEqual(rows["DGLab/Action"]["dir"], "in")
+            self.assertEqual(rows[_path("DGLabBmtrPressure")]["dir"], "out")
+            self.assertEqual(rows[_path("DGLabEmergency")]["dir"], "in")
+            self.assertEqual(rows["DGLab/Action"]["dir"], "out")
         finally:
             mod.bridge.close()
+
+    def test_received_param_reuses_registered_row(self):
+        """收到的参数按收包路径复用已登记行，不再另造一行短名。"""
+        mod, ctx = _make_module(_state(("c1", "COYOTE_030")))
+        bridge = OscBridge(
+            OscConfig(dict(CONFIG), defaults=OSC_CONFIG_DEFAULTS),
+            ctx.engine.get_state)
+        mod.bridge = bridge
+        bridge.input_values["avatar/parameters/DGLabWaveA"] = {
+            "value": 2, "ts": time.monotonic()}
+        bridge.input_values["avatar/parameters/Whatever"] = {
+            "value": 9, "ts": time.monotonic()}
+        try:
+            rows = {row["name"]: row for row in mod.link_params()}
+            self.assertEqual(rows[_path("DGLabWaveA")]["label"],
+                             "OSC 可读 · 郊狼通道 A 波形选择")
+            self.assertEqual(rows[_path("Whatever")]["label"],
+                             "头像参数 · Whatever")
+            self.assertEqual(rows[_path("Whatever")]["dir"], "in")
+            # 短名行不该再出现：同一参数在变量表里只能有一行
+            self.assertNotIn("DGLabWaveA", rows)
+            self.assertNotIn("Whatever", rows)
+        finally:
+            bridge.close()
 
 
 class NotifyTests(unittest.TestCase):

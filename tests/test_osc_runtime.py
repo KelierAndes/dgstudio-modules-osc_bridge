@@ -79,7 +79,7 @@ class OscReceiveTests(unittest.IsolatedAsyncioTestCase):
             written.get(TEMP_PATH_PREFIX + default_input_name(
                 bridge.config, "in_strength_a")), 55)
         self.assertNotIn(TEMP_PATH_PREFIX + "Whatever", written)
-        self.assertIn("Whatever", bridge.param_names())
+        self.assertIn("avatar/parameters/Whatever", bridge.param_names())
         # 镜像进来的值不再回发，避免头像自己回声
         self.assertIn(TEMP_PATH_PREFIX + "DGLabStrengthA", bridge._no_send)
 
@@ -93,10 +93,14 @@ class OscReceiveTests(unittest.IsolatedAsyncioTestCase):
         bridge._track_input("/avatar/parameters/blood", 120)
         bridge._track_input("/avatar/parameters/flag", True)
         bridge._track_input("/avatar/parameters/text", "abc")
-        self.assertEqual(bridge.engine.signals.get("blood"), 120.0)
-        self.assertEqual(bridge.engine.signals.get("flag"), 1.0)
+        # 键 = 去斜杠的收包地址，与登记行同名；读数卡与实时值刷新都按这个键取
+        self.assertEqual(bridge.engine.signals.get("avatar/parameters/blood"),
+                         120.0)
+        self.assertEqual(bridge.engine.signals.get("avatar/parameters/flag"),
+                         1.0)
         self.assertNotIn("text", bridge.engine.signals)
-        self.assertEqual(bridge.input_values["text"]["value"], "abc")
+        self.assertEqual(
+            bridge.input_values["avatar/parameters/text"]["value"], "abc")
         bridge._track_input("/avatar/change")
         self.assertEqual(bridge.engine.signals, {})
 
@@ -161,8 +165,9 @@ class OscRealUdpTests(unittest.IsolatedAsyncioTestCase):
         SimpleUDPClient("127.0.0.1", port).send_message(
             "/" + TEMP_PATH_PREFIX + "DGLabBattery", [88])
         await asyncio.sleep(0.3)
-        self.assertEqual(bridge.input_values.get("DGLabBattery", {}).get("value"),
-                         88)
+        self.assertEqual(
+            bridge.input_values.get(TEMP_PATH_PREFIX + "DGLabBattery",
+                                    {}).get("value"), 88)
         await bridge.stop()
         self.assertFalse(bridge._running)
 

@@ -98,7 +98,7 @@ def _attach_bridge(mod: OscModule, ctx: _Ctx) -> OscBridge:
 
 
 class RenamableRowsTests(unittest.TestCase):
-    """登记行必须标 renamable，方向 / 值类型口径与 v1.13 保持一致。"""
+    """登记行必须标 renamable，方向按数据流判定（v1.18 起）。"""
 
     def test_every_row_is_renamable(self):
         mod, ctx = _make_module(_state(("c1", "COYOTE_030"), ("b1", "BMTR_1")))
@@ -112,12 +112,12 @@ class RenamableRowsTests(unittest.TestCase):
         by = {row["key"]: row for row in mod.temp_specs()}
         self.assertEqual(sorted(by[_path("DGLabStrengthA")]),
                          ["desc", "dir", "key", "label", "renamable", "type"])
-        # 方向按参数语义：核心输入参数可写、设备回传读数可读、两边都有则读写
+        # 方向按数据流：头像发入的控制参数可读，核心读数回传头像可写
         self.assertEqual(by[_path("DGLabStrengthA")]["dir"], "inout")
-        self.assertEqual(by[_path("DGLabWaveA")]["dir"], "out")
-        self.assertEqual(by[_path("DGLabEmergency")]["dir"], "out")
-        self.assertEqual(by["DGLab/Action"]["dir"], "in")
-        self.assertEqual(by[_path("DGLabBmtrPressure")]["dir"], "in")
+        self.assertEqual(by[_path("DGLabWaveA")]["dir"], "in")
+        self.assertEqual(by[_path("DGLabEmergency")]["dir"], "in")
+        self.assertEqual(by["DGLab/Action"]["dir"], "out")
+        self.assertEqual(by[_path("DGLabBmtrPressure")]["dir"], "out")
         self.assertEqual(by[_path("DGLabBmtrPressure")]["type"], "Float")
 
     def test_unconnected_device_still_registers_nothing(self):

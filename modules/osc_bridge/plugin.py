@@ -6,7 +6,7 @@ import re
 META = {
     "id": "osc_bridge",
     "name": "VRChat OSC 联动",
-    "version": "1.17.0",
+    "version": "1.18.0",
     "description": "设备接入即向核心变量表登记全部可读 / 可写参数"
                    "（变量名 = OSC 路径，带可读 / 可写标记，落在变量表可改名栏，"
                    "改名即改收发地址），事件流画布用读数 / 回传卡片直接收发。",
@@ -71,7 +71,7 @@ class OscModule(ModuleBase):
         return META["config"]
 
     def link_params(self) -> list[dict]:
-        """本模块向宿主登记的参数行：全部标成可改名，方向按参数语义判定。
+        """本模块向宿主登记的参数行：全部标成可改名，方向按数据流判定。
 
         返回字典而不是 (名字, 标签) 元组——元组会被宿主当成不可改名的系统参数，
         这些头像参数本来就是用户自己的地址，要落在变量表的可改名栏里。
@@ -79,11 +79,6 @@ class OscModule(ModuleBase):
         if self.bridge is None:
             return []
         pool: dict[str, dict] = {}
-        for name in self.bridge.param_names():
-            if name != "change":
-                # 动态参数表：收到哪个头像参数才建哪一行，收进来即宿主可读
-                pool[name] = {"label": f"头像参数 · {name}", "dir": "in",
-                              "type": "Float"}
         state = None
         try:
             state = self.bridge.get_state()
@@ -91,8 +86,15 @@ class OscModule(ModuleBase):
             state = None
         settings = self.ctx.settings
         if state is not None and _has_devices(settings, state):
-            for name, row in _wired_rows(settings, state).items():
-                pool.setdefault(name, row)
+            pool.update(_wired_rows(settings, state))
+        for path in self.bridge.param_names():
+            if path == "avatar/change":
+                continue
+            # 收到的参数复用已登记的同名行；没登记过的按收包路径补一行，
+            # 不再按短名另造一行（那会让同一参数在变量表里出现两次）
+            leaf = str(path).rsplit("/", 1)[-1]
+            pool.setdefault(str(path), {"label": f"头像参数 · {leaf}",
+                                        "dir": "in", "type": "Float"})
         return [{"name": name, "label": row["label"], "dir": row["dir"],
                  "type": row["type"], "renamable": True}
                 for name, row in sorted(pool.items())]
@@ -101,8 +103,9 @@ class OscModule(ModuleBase):
         """本模块向变量表登记的行：按当前在连设备实时算出全部路径变量。
 
         变量名即 OSC 路径（设备参数 avatar/parameters/<名>，全局参数 <前缀>/<名>），
-        方向按参数语义判定（见 _wired_rows）：核心输入参数宿主可写、设备回传
-        读数宿主可读。不落配置文件——共享变量表由核心维护，模块只负责声明与收发。
+        方向按数据流判定（见 _wired_rows）：头像发入的核心输入参数宿主可读、
+        核心读数回传头像宿主可写。不落配置文件——共享变量表由核心维护，
+        模块只负责声明与收发。
         """
         if self.ctx is None:
             return []
@@ -269,27 +272,28 @@ def drop_retired_rows(settings, log=None) -> bool:
 
 
 def _wired_rows(settings, state) -> dict[str, dict]:
-    """{变量名: 登记行}，方向按**参数语义**判定，不按路径判定。
+    """{变量名: 登记行}，方向按**数据流**判定，不按路径判定。
 
-    核心输入参数（强度 / 波形 / 步进 / 开火 / 急停…）是宿主能驱动下去的量 →
-    可写；设备回传信号（电量 / 连接状态 / 通道状态 / 上限 / 气压 / 按键反馈）
-    只能被读出来 → 可读。两类都挂在 avatar/parameters/ 路径下，只看路径会把
-    电量这类读数也误标成可写。同名两边都有（通道强度既下发又回读）记成读写。
+    核心输入参数（强度 / 波形 / 步进 / 开火 / 急停…）的值由头像发进来，宿主
+    读出来再写核心参数 → 可读（in）；设备读数（电量 / 连接状态 / 通道状态 /
+    上限 / 气压 / 按键反馈）由核心读出后按变量名发回头像 → 可写（out）。
+    两类都挂在 avatar/parameters/ 路径下。同名两边都有（通道强度既下发又
+    回读）记成读写。
     """
     rows: dict[str, dict] = {}
     for spec in _wired_inputs(settings, state):
         name = _temp_path(spec.get("name")
                           or default_input_name(settings, spec["key"]))
-        rows[name] = {"label": f"OSC 可写 · {spec['label']}", "dir": "out",
+        rows[name] = {"label": f"OSC 可读 · {spec['label']}", "dir": "in",
                       "type": str(spec.get("type") or ""),
-                      "desc": "模块登记 · 按变量名回传头像"}
+                      "desc": "模块登记 · 收包镜像进同名变量，读出后写核心参数"}
     for spec in _wired_outputs(settings, state):
         name = _out_var_name(settings, spec)
         row = rows.get(name)
         if row is None:
-            rows[name] = {"label": f"OSC 可读 · {spec['label']}", "dir": "in",
+            rows[name] = {"label": f"OSC 可写 · {spec['label']}", "dir": "out",
                           "type": str(spec.get("type") or ""),
-                          "desc": "模块登记 · 收包镜像进同名变量"}
+                          "desc": "模块登记 · 核心读数按变量名回传头像"}
         else:
             row["dir"] = "inout"
             row["label"] = f"OSC 读写 · {spec['label']}"

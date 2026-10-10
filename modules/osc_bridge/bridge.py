@@ -77,8 +77,10 @@ class OscConfig(dict):
 class OscValueSpace:
     """核心的共享值空间在桥这边的挂接点（宿主按 `bridge.engine` 找它）。
 
-    - `signals`：收到的头像参数值。事件流的读数卡与变量表实时值都从这里取
-      （`flow_host.module_signals`），所以收包必须写它，不能只留时间戳。
+    - `signals`：收到的参数值，键 = 去斜杠的收包地址（avatar 参数即
+      `avatar/parameters/<名>`），与登记行同名。事件流的读数卡与变量表实时值
+      都从这里取（`flow_host.module_signals`），所以收包必须写它，不能只留
+      时间戳。
     - `temps`：核心的共享变量表，由宿主 `attach_temps` 接进来；事件流的写入卡片
       往这里写，桥按变量名当 OSC 地址发出去。
     - `pump()`：宿主写完一个值后调它。这里不再求值也不派发，发什么由 `_push_loop`
@@ -187,12 +189,15 @@ class OscBridge:
             return
         if not args:
             return
-        name = str(addr).rstrip("/").rsplit("/", 1)[-1]
-        self.input_values[name] = {"value": args[0], "ts": time.monotonic()}
+        # 键 = 去斜杠的收包地址，与登记行同名；读数卡与实时值刷新都按这个键取
+        path = str(addr).strip("/")
+        if not path:
+            return
+        self.input_values[path] = {"value": args[0], "ts": time.monotonic()}
         num = as_number(args[0])
         if num is not None:
-            self.engine.signals[name] = num
-        self._mirror_input(name, args[0])
+            self.engine.signals[path] = num
+        self._mirror_input(path.rsplit("/", 1)[-1], args[0])
 
     def _mirror_input(self, name: str, value) -> None:
         if name not in self._input_names:
@@ -210,6 +215,7 @@ class OscBridge:
             self.log(f"[OSC] 临时变量镜像 {name} 失败: {exc!r}")
 
     def param_names(self, max_age_s: float = 120.0) -> list[str]:
+        """近期收到过的参数：键与登记行同名（去斜杠的收包地址）。"""
         now = time.monotonic()
         names = [name for name, rec in self.input_values.items()
                  if now - rec.get("ts", now) <= max_age_s]
@@ -218,11 +224,11 @@ class OscBridge:
     def recent_inputs(self, max_age_s: float = 30.0) -> list[dict]:
         now = time.monotonic()
         rows = []
-        for name, rec in self.input_values.items():
+        for path, rec in self.input_values.items():
             age = now - rec.get("ts", now)
             if age > max_age_s:
                 continue
-            rows.append({"param": name, "value": rec.get("value"), "age": age})
+            rows.append({"param": path, "value": rec.get("value"), "age": age})
         return sorted(rows, key=lambda r: r["param"])
 
     @staticmethod
